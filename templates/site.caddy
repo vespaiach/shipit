@@ -1,0 +1,27 @@
+# managed by shipit — edit /etc/shipit/apps/${APP}.conf or ${APP}.extra instead
+${DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:${PORT} {
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output file /var/log/shipit/${APP}/access.log {
+			roll_disabled
+		}
+		format filter {
+			request>uri query {
+${REDACT_LINES}
+			}
+		}
+	}
+
+	import /etc/caddy/sites/${APP}.extra
+}

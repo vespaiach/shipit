@@ -6,8 +6,10 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S1. `shipit setup` works; every other command except `help` says it isn't
-> implemented yet. See the milestones in plan §8.
+> **Status:** milestone S2. `shipit setup` works, and `shipit deploy` deploys a public, zero-config
+> Next.js app without a database (no private repos, `deploy.conf`, `.env.example` prompts, database,
+> `--ref` or rollback yet). Every other command except `help` says it isn't implemented yet. See the
+> milestones in plan §8.
 
 ## Quick start
 
@@ -27,6 +29,15 @@ then installs PostgreSQL 18, Caddy and Node.js LTS, adds swap, the `deployer` ac
 host keys, a firewall, log rotation and the backup timer template. It turns off SSH password logins
 only when this session logged in with a key and the admin has one. It never overwrites a Caddyfile
 or `nftables.conf` it didn't write, and a re-run changes nothing.
+
+`deploy <url>` on a new repo asks for the domain (and an app name only if the one derived from the
+repo can't be used), picks the next free port from 3001, and writes `/etc/shipit/apps/<app>.conf`.
+Then, on every deploy, it creates the app's user, folders, env file (`/etc/<app>/env`), systemd units
+and Caddy site; builds the branch as `deployer` (`npm ci`, `npm run build`, one build at a time);
+switches `/opt/<app>/current` atomically; restarts `<app>.target`; and checks `/` answers below 500.
+Without a `deploy.conf`, the repo needs `next` in `package.json` and a `package-lock.json`. Logs are in
+`/var/log/shipit/<app>/` (`web.log`, `web.error.log`, `access.log`, `deploy.log`, and the last 10
+build logs in `builds/`).
 
 ## Day to day
 

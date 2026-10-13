@@ -7,6 +7,8 @@
 DEPLOY_USER=deployer
 SHIPIT_ETC=/etc/shipit
 SHIPIT_VAR=/var/lib/shipit
+# Where each app's code lives: $SHIPIT_OPT/<app>/{repo,releases,current,previous}.
+SHIPIT_OPT=/opt
 # The owner every file root sources from SHIPIT_ETC must have. Tests set it to their own uid.
 SHIPIT_OWNER_UID=0
 
@@ -111,6 +113,16 @@ unit_sets_port() {
   systemctl cat -- "$1@.service" 2>/dev/null | grep -Eq "^Environment=(.* )?PORT=$2( |\$)"
 }
 
+# A git branch name as `git ls-remote --symref` reports it, or as written in an app config.
+check_branch() {
+  local LC_ALL=C
+  if [[ $1 =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] && [[ $1 != *..* && $1 != */ && $1 != *.lock ]]; then
+    return 0
+  fi
+  err "Invalid branch '$1'."
+  return 1
+}
+
 check_repo() {
   local LC_ALL=C part='[A-Za-z0-9_.-]+'
   [[ $1 =~ ^https://github\.com/$part/$part$ ]] && return 0
@@ -131,6 +143,20 @@ check_env_value() {
     err "Env values can't start or end with whitespace."
     return 1
   fi
+}
+
+# LOG_REDACT_QUERY: query parameter names, separated by spaces. Each becomes a Caddy `delete` line.
+check_redact_query() {
+  local LC_ALL=C
+  [[ $1 =~ ^[A-Za-z0-9_.-]+( [A-Za-z0-9_.-]+)*$ ]] && return 0
+  err "Invalid LOG_REDACT_QUERY '$1': list query parameter names (letters, digits, _ . -) separated by spaces."
+  return 1
+}
+
+check_number() {
+  [[ $2 =~ ^[1-9][0-9]*$ ]] && return 0
+  err "Invalid $1 '$2'."
+  return 1
 }
 
 # The admin account setup uses: root, or a named login user other than the deploy account.
@@ -217,6 +243,33 @@ allocate_port() {
   done
   err "No free port from $FIRST_APP_PORT to 65535."
   return 1
+}
+
+# ---- Files, users and prompts --------------------------------------------------------------------
+
+is_shipit_file() {
+  head -n 3 -- "$1" | grep "^$MANAGED_MARKER" >/dev/null
+}
+
+# install_if_changed <new file> <dest> <mode>: installs only when the content differs. Fails (1) when
+# there was nothing to change.
+install_if_changed() {
+  if [ -f "$2" ] && cmp -s "$1" "$2"; then
+    chmod "$3" "$2"
+    return 1
+  fi
+  install -m "$3" "$1" "$2"
+}
+
+user_home() {
+  getent passwd "$1" | cut -d: -f6
+}
+
+# ask <prompt> <var>: reads one answer. Fails when input runs out with nothing typed.
+ask() {
+  local reply
+  read -r -p "$1" reply || [ -n "$reply" ] || return 1
+  printf -v "$2" '%s' "$reply"
 }
 
 # ---- Locks ---------------------------------------------------------------------------------------
