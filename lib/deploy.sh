@@ -336,20 +336,21 @@ env_missing_keys() {
   done
 }
 
-# env_file_lines <file>: prints the env file's KEY=value lines, read literally the way systemd reads
-# them: blank lines and # or ; comments are skipped, nothing is expanded or unquoted. Fails on a line
-# that isn't KEY=value or a value the env-value rule refuses.
+# env_file_lines <file> [name]: prints the env file's KEY=value lines, read literally the way systemd
+# reads them: blank lines and # or ; comments are skipped, nothing is expanded or unquoted. Fails on a
+# line that isn't KEY=value or a value the env-value rule refuses, naming the line (and the file as
+# <name>, when given: shipit env checks a temp copy).
 env_file_lines() {
-  local line n=0 LC_ALL=C
+  local line n=0 name=${2:-$1} LC_ALL=C
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
     [[ $line =~ ^[[:space:]]*([#\;].*)?$ ]] && continue
     if ! [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      err "$1 line $n isn't KEY=value."
+      err "$name line $n isn't KEY=value."
       return 1
     fi
     if ! check_env_value "${line#*=}" 2>/dev/null; then
-      err "$1 line $n (${line%%=*}): values can't contain quotes, backslashes or line breaks, or start or end with whitespace."
+      err "$name line $n (${line%%=*}): values can't contain quotes, backslashes or line breaks, or start or end with whitespace."
       return 1
     fi
     printf '%s\n' "$line"
