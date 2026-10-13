@@ -48,5 +48,5 @@ make lint   # bash -n, shellcheck, shfmt -i 2 -ci -bn -d
 make test   # bats test/unit
 ```
 
-CI (`.github/workflows/ci.yml`, on `ubuntu-latest`) runs both. End-to-end scenarios run in an Incus
-VM by hand with `test/e2e/run.sh`; they aren't part of CI.
+There's no hosted CI: run `make` before every merge. End-to-end scenarios run in an Incus VM by hand
+with `test/e2e/run.sh`.

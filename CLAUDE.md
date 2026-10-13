@@ -17,7 +17,7 @@ keep it, README.md and this file in step with the code.
   runs; `templates/` holds what `render` fills in.
 - `install.sh` — copies `bin lib libexec templates` to `/usr/local/lib/shipit`, links
   `/usr/local/bin/shipit`.
-- `test/unit/*.bats` (CI), `test/golden/` (expected rendered output), `test/fixtures/`,
+- `test/unit/*.bats` (`make test`), `test/golden/` (expected rendered output), `test/fixtures/`,
   `test/e2e/run.sh` plus `test/e2e/scenarios/*.sh` (Incus VM, by hand).
 - `reference/tracklite-ops/` — the original scripts being generalised. Read-only; not linted.
 
@@ -49,8 +49,8 @@ keep it, README.md and this file in step with the code.
 
 - `shfmt -i 2 -ci -bn` formatting, shellcheck clean. Disable a check only on the line that needs it,
   with a reason.
-- `make lint` (bash -n, shellcheck, shfmt) and `make test` (bats). CI runs both on `ubuntu-latest`;
-  that's the real result. On macOS, `/bin/bash` is 3.2: install `bash`, `bats-core`, `shellcheck`,
+- `make lint` (bash -n, shellcheck, shfmt) and `make test` (bats). There's no hosted CI;
+  `make` passing locally is the gate before merging. On macOS, `/bin/bash` is 3.2: install `bash`, `bats-core`, `shellcheck`,
   `shfmt`, `gettext` and `flock` with Homebrew so `env bash` finds bash 5. Tests that need GNU-only
   tools or root skip with a stated reason.
 - Every rendered template gets a golden file in `test/golden/` and a unit test comparing against it.
@@ -67,6 +67,5 @@ Milestones are in plan §8 (S0 … S7). For each one:
    inside the VM as root from `/root/shipit` after `install.sh`, and exits non-zero on failure.
 5. Run `make` locally.
 6. Commit, push, open a PR against `main`. The PR body says what's implemented, the decisions taken,
-   and what's tested in CI versus e2e only (and whether e2e was actually run).
-7. Wait for CI to go green (`gh pr checks <n> --watch`); fix and push until it does. Don't merge
-   without review.
+   and what's tested by `make` versus e2e only (and whether e2e was actually run).
+7. Merge the PR into `main` once `make` passes, then start the next milestone.
