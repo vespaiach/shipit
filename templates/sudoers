@@ -1,0 +1,2 @@
+# managed by shipit
+${ADMIN_USER} ALL=(ALL:ALL) NOPASSWD: ALL

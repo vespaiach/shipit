@@ -1,0 +1,2 @@
+# managed by shipit
+ops ALL=(ALL:ALL) NOPASSWD: ALL

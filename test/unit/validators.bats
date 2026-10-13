@@ -266,3 +266,44 @@ setup() {
   [ "$status" -eq 1 ]
   [[ $output == *"not writable by group or others"* ]]
 }
+
+@test "admin user: accepts root and login names" {
+  for name in root ops my-admin a_1 "a$(printf 'b%.0s' {1..31})"; do
+    run check_admin_user "$name"
+    [ "$status" -eq 0 ] || {
+      echo "refused $name"
+      return 1
+    }
+  done
+}
+
+@test "admin user: refuses invalid names and the deploy account" {
+  for name in '' Ops 1ops -ops 'o ps' 'ops;id' deployer "a$(printf 'b%.0s' {1..32})"; do
+    run check_admin_user "$name"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $name"
+      return 1
+    }
+  done
+}
+
+@test "email: accepts plain addresses" {
+  for email in owner@example.com first.last+tls@mail.example.co.uk a_b%c@x-y.io; do
+    run check_email "$email"
+    [ "$status" -eq 0 ] || {
+      echo "refused $email"
+      return 1
+    }
+  done
+}
+
+@test "email: refuses anything that could break host.conf or the Caddyfile" {
+  for email in '' owner owner@example 'a b@example.com' 'a@example.com }' '$(id)@example.com' 'a@b.com;x' "a@b.com
+x"; do
+    run check_email "$email"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $email"
+      return 1
+    }
+  done
+}

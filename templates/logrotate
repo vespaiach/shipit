@@ -1,0 +1,10 @@
+# managed by shipit
+/var/log/shipit/*/*.log {
+	daily
+	rotate ${LOG_KEEP_DAYS}
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+}

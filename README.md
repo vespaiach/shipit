@@ -6,8 +6,8 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S0 (skeleton). The dispatcher, shared library and checks exist; every
-> command except `help` says it isn't implemented yet. See the milestones in plan §8.
+> **Status:** milestone S1. `shipit setup` works; every other command except `help` says it isn't
+> implemented yet. See the milestones in plan §8.
 
 ## Quick start
 
@@ -21,6 +21,12 @@ sudo shipit deploy https://github.com/<you>/<app>     # first deploy asks for th
 
 `install.sh` copies the tool to `/usr/local/lib/shipit` and links `/usr/local/bin/shipit`. Re-run it
 after a `git pull` to update.
+
+`setup` asks for an email for TLS notices (may be blank) and the admin username (default `root`),
+then installs PostgreSQL 18, Caddy and Node.js LTS, adds swap, the `deployer` account, GitHub's SSH
+host keys, a firewall, log rotation and the backup timer template. It turns off SSH password logins
+only when this session logged in with a key and the admin has one. It never overwrites a Caddyfile
+or `nftables.conf` it didn't write, and a re-run changes nothing.
 
 ## Day to day
 
