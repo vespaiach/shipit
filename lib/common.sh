@@ -272,6 +272,14 @@ ask() {
   printf -v "$2" '%s' "$reply"
 }
 
+# ask_hidden <prompt> <var>: like ask, without showing what's typed (for secrets).
+ask_hidden() {
+  local reply
+  read -r -s -p "$1" reply || [ -n "$reply" ] || return 1
+  printf '\n' >&2
+  printf -v "$2" '%s' "$reply"
+}
+
 # ---- Locks ---------------------------------------------------------------------------------------
 # Each takes the lock file's path. The lock is held on the file descriptor in LOCK_FD until
 # lock_release or the process exits. Save LOCK_FD before taking a second lock.

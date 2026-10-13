@@ -74,3 +74,25 @@ short_sha() {
 served() {
   curl -fsSk --max-time 20 --resolve "$1:443:127.0.0.1" "https://$1/"
 }
+
+# add_line <bare repo> <file> <line>: commits <line> appended to <file> on main of the bare repo, keeping
+# the repo's owner. Prints the new commit's 7-character sha.
+add_line() {
+  local repo=$1 file=$2 line=$3 owner work
+  owner=$(stat -c %U "$repo")
+  work=$(mktemp -d)
+  git -c safe.directory='*' clone -q "$repo" "$work"
+  printf '%s\n' "$line" >>"$work/$file"
+  git -C "$work" add -A
+  git -C "$work" -c user.name=e2e -c user.email=e2e@localhost commit -q -m "add $line to $file"
+  git -c safe.directory='*' -C "$work" push -q origin main
+  git -C "$work" rev-parse --short=7 HEAD
+  rm -rf "$work"
+  chown -R "$owner:" "$repo"
+}
+
+# in_terminal <command>: runs the command in a pseudo-terminal, so deploy's hidden prompts are asked,
+# feeding it this function's stdin as typed answers. Exits with the command's status.
+in_terminal() {
+  script -qec "$1" /dev/null
+}

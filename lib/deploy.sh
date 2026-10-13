@@ -3,8 +3,8 @@
 # the release (C), then the release steps D1–D11. Sourcing this file only defines constants and
 # functions.
 #
-# Milestone seams, marked "S3:", "S4:" and "S5:" below: private repos, deploy.conf and .env.example
-# prompts (S3), the database and MIGRATE (S4), --ref and HEALTH_FAIL=rollback (S5).
+# Milestone seams, marked "S4:" and "S5:" below: the database and MIGRATE (S4), --ref and
+# HEALTH_FAIL=rollback (S5).
 
 CADDY_SITES=/etc/caddy/sites
 CADDYFILE=/etc/caddy/Caddyfile
@@ -14,9 +14,30 @@ LOG_ROOT=/var/log/shipit
 SYSTEM_PATH=/usr/bin:/bin
 BUILD_LOGS_KEEP=10
 HEALTH_TIMEOUT=60
+# How often a private repo's ls-remote is retried while waiting for its deploy key to be added.
+KEY_RETRY_SECONDS=5
+
+# Run as deployer by deploy_commands when the release has a deploy.conf: sources it the way the build
+# will, and checks it sets what deploy needs. Root never sources repo content.
+# shellcheck disable=SC2016 # expanded by the deployer's bash, not here
+CONF_CHECK_SCRIPT='set -u
+cd "$1" || exit 1
+. ./deploy.conf || exit 1
+missing=""
+[ -n "${INSTALL-}" ] || missing="$missing INSTALL"
+[ -n "${BUILD-}" ] || missing="$missing BUILD"
+[ -n "$(compgen -v PROCESS_)" ] || missing="$missing PROCESS_<name>"
+if [ -n "$missing" ]; then
+  echo "deploy.conf must set$missing." >&2
+  exit 1
+fi
+if [ -n "${MIGRATE-}" ]; then
+  echo "deploy.conf sets MIGRATE, but shipit does not run migrations yet. Remove it for now." >&2
+  exit 1
+fi'
 
 # Run as deployer by deploy_build, with the env file's lines on stdin. Root never sources repo content;
-# this script runs the commands as deployer. S3: it sources deploy.conf here when the release has one.
+# this script sources the release's deploy.conf, if any, and runs the commands as deployer.
 # shellcheck disable=SC2016 # expanded by the deployer's bash, not here
 BUILD_SCRIPT='set -euo pipefail
 umask 022
@@ -26,6 +47,7 @@ cd "$1"
 export PATH="$PWD/node_modules/.bin:$PATH"
 INSTALL="npm ci --no-audit --no-fund"
 BUILD="npm run build"
+if [ -f deploy.conf ]; then . ./deploy.conf; fi
 printf "== %s\n" "$INSTALL"
 bash -c "$INSTALL"
 printf "== %s\n" "$BUILD"
@@ -44,6 +66,7 @@ RELEASE=''
 SWITCHED=''
 PROCESSES=()
 HEALTH_PATH=''
+GIT_ENV=(GIT_TERMINAL_PROMPT=0)
 
 # ---- Small parsers and checks (unit-tested) ------------------------------------------------------
 
@@ -74,6 +97,52 @@ repo_key() {
   else
     printf '%s\n' "$url"
   fi
+}
+
+# repo_ssh_url <url>: the URL a deploy key works with. GitHub's HTTPS form becomes
+# git@github.com:<owner>/<repo>.git; SSH URLs are used as they are. Fails for anything else (file://).
+repo_ssh_url() {
+  local LC_ALL=C part='[A-Za-z0-9_.-]+'
+  if [[ $1 =~ ^https://github\.com/($part)/($part)$ ]]; then
+    printf 'git@github.com:%s/%s.git\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]%.git}"
+  elif repo_uses_key "$1"; then
+    printf '%s\n' "$1"
+  else
+    return 1
+  fi
+}
+
+# repo_uses_key <repo>: SSH URLs are fetched with the app's deploy key; HTTPS and file:// without.
+repo_uses_key() {
+  [[ $1 == git@github.com:* || $1 == ssh://* ]]
+}
+
+# deploy_key_url <repo>: GitHub's page for adding a deploy key to the repo. Nothing for other hosts.
+deploy_key_url() {
+  local key
+  key=$(repo_key "$1")
+  [[ $key != github.com/* ]] || printf 'https://%s/settings/keys/new\n' "$key"
+}
+
+# git_ssh_command <key file>: how deployer's git reaches an SSH repo: with that key only, never asking,
+# and trusting only the host keys in /etc/ssh/ssh_known_hosts (GitHub's are pinned by setup).
+git_ssh_command() {
+  printf 'ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null\n' "$1"
+}
+
+# new_app_repo <url> <head file>: prints the REPO a new app uses. When an anonymous ls-remote of the
+# HTTPS (or file://) URL works, the repo is public: that URL, with the ls-remote output left in <head
+# file>. Otherwise, and always for ssh:// URLs, the repo is private: its SSH URL, fetched with a deploy
+# key. Fails when there's no SSH form to fall back to.
+new_app_repo() {
+  local url
+  url=$(repo_probe_url "$1")
+  if [[ $1 != ssh://* ]] \
+    && as_deployer GIT_TERMINAL_PROMPT=0 git ls-remote --symref "$url" HEAD >"$2" 2>/dev/null; then
+    printf '%s\n' "$url"
+    return 0
+  fi
+  repo_ssh_url "$1"
 }
 
 # app_for_repo <repo>: prints the app whose REPO is this repo, if any.
@@ -117,10 +186,47 @@ zero_config_check() {
   fi
 }
 
-# release_processes <release>: the process names the release runs, one per line. S3: read from
-# deploy.conf with grep -E '^PROCESS_[a-z][a-z0-9_]*=' when the release has one.
-release_processes() {
-  printf '%s\n' web
+# conf_processes: reads deploy.conf on stdin and prints its process names, one per line, in order and
+# without repeats. Root never sources deploy.conf, so only lines that start with PROCESS_<name>= count:
+# indented, commented, `export`ed or computed names ($(...)) are ignored, and the value is never read.
+conf_processes() {
+  LC_ALL=C awk 'match($0, /^PROCESS_[a-z][a-z0-9_]*=/) { n = substr($0, 9, RLENGTH - 9); if (!seen[n]++) print n }'
+}
+
+# conf_health_path: reads deploy.conf on stdin and prints HEALTH_PATH: the value of the last line that
+# starts with HEALTH_PATH=, or nothing. The value must be a plain path (/ then letters, digits and
+# . _ ~ / -), optionally quoted and followed by a # comment. Any other value is refused, naming the line.
+conf_health_path() {
+  local line n=0 value='' LC_ALL=C p='/[A-Za-z0-9._~/-]*' re
+  re="^HEALTH_PATH=($p|\"$p\"|'$p')?([[:space:]]+#.*)?[[:space:]]*\$"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [[ $line == HEALTH_PATH=* ]] || continue
+    if ! [[ $line =~ $re ]]; then
+      err "deploy.conf line $n: HEALTH_PATH must be a plain path, like HEALTH_PATH=/health."
+      return 1
+    fi
+    value=${BASH_REMATCH[1]//[\"\']/}
+  done
+  printf '%s\n' "$value"
+}
+
+# env_example_keys: reads .env.example on stdin and prints its key names, one per line, in order and
+# without repeats. Only lines that start with KEY= (uppercase letters, digits and _) count: comments,
+# indented and `export` lines are ignored, and the example values are never used.
+env_example_keys() {
+  LC_ALL=C awk 'match($0, /^[A-Z_][A-Z0-9_]*=/) { k = substr($0, 1, RLENGTH - 1); if (!seen[k]++) print k }'
+}
+
+# env_missing_keys <env file>: reads key names on stdin and prints those the env file doesn't set yet.
+# PORT and NODE_ENV come from the unit (and the env file would override them), so they're never asked.
+env_missing_keys() {
+  local key
+  while IFS= read -r key; do
+    case $key in PORT | NODE_ENV) continue ;; esac
+    if [ -f "$1" ] && grep -q "^$key=" -- "$1"; then continue; fi
+    printf '%s\n' "$key"
+  done
 }
 
 # env_file_lines <file>: prints the env file's KEY=value lines, read literally the way systemd reads
@@ -224,6 +330,16 @@ as_deployer() {
   (cd / && runuser -u "$DEPLOY_USER" -- env -i HOME="$home" PATH="$SYSTEM_PATH" LANG=C.UTF-8 "$@")
 }
 
+# release_has <file> and release_cat <file>: read a file in the release as deployer, so a symlink in
+# the repo can't make root read something else. Root only ever treats what it reads as data.
+release_has() {
+  as_deployer test -f "$RELEASE/$1"
+}
+
+release_cat() {
+  as_deployer cat -- "$RELEASE/$1" </dev/null
+}
+
 # ensure_file <path> <owner:group> <mode>: creates an empty file if it's missing. Never overwrites.
 ensure_file() {
   [ -e "$1" ] || install -m "$3" -o "${2%%:*}" -g "${2#*:}" /dev/null "$1"
@@ -240,6 +356,21 @@ dns_points_at() {
 
 need_answer() {
   die "deploy needs answers to its questions. Run it in a terminal."
+}
+
+# deploy_key_path: deployer's key for this app's repo.
+deploy_key_path() {
+  printf '%s/.ssh/shipit_%s\n' "$(user_home "$DEPLOY_USER")" "$APP"
+}
+
+# set_git_env: the environment deployer's git runs with. SSH repos use the app's deploy key.
+set_git_env() {
+  GIT_ENV=(GIT_TERMINAL_PROMPT=0)
+  if repo_uses_key "$REPO"; then GIT_ENV+=("GIT_SSH_COMMAND=$(git_ssh_command "$(deploy_key_path)")"); fi
+}
+
+repo_ls_remote() {
+  as_deployer "${GIT_ENV[@]}" git ls-remote --symref "$REPO" HEAD >"$DEPLOY_TMP/head" 2>/dev/null </dev/null
 }
 
 # Appends one line to deploy.log for every deploy that got the app lock, deletes a release that was
@@ -274,14 +405,13 @@ deploy_resolve() {
 }
 
 deploy_new_app() {
-  local url=$1 head ip conf
+  local url=$1 ip conf
   log "== New app from $url"
-  REPO=$(repo_probe_url "$url")
-  # Public or private: an anonymous ls-remote. S3: on failure, use the SSH URL and a deploy key.
-  head=$(as_deployer GIT_TERMINAL_PROMPT=0 git ls-remote --symref "$REPO" HEAD 2>/dev/null) \
-    || die "Couldn't read $url without credentials. Private repos aren't supported yet: make it public, or check the URL."
-  BRANCH=$(default_branch <<<"$head") || die "Couldn't find the default branch of $url."
-  check_branch "$BRANCH" || exit 1
+  # Public or private: an anonymous ls-remote, which leaves its output in head for a public repo.
+  REPO=$(new_app_repo "$url" "$DEPLOY_TMP/head") || die "Couldn't read $url. Check the URL."
+  if repo_uses_key "$REPO"; then
+    log "$url needs credentials, so shipit will fetch it over SSH ($REPO) with a read-only deploy key."
+  fi
 
   APP=$(app_name_from_repo "$url")
   if ! app_name_free "$APP"; then
@@ -300,6 +430,11 @@ deploy_new_app() {
   fi
   PORT=$(allocate_port) || exit 1
   # S4: ask "Create a PostgreSQL database? [Y/n]" here, defaulting from package.json.
+
+  # A private repo's default branch can only be read once its deploy key works.
+  if repo_uses_key "$REPO"; then deploy_repo_access; fi
+  BRANCH=$(default_branch <"$DEPLOY_TMP/head") || die "Couldn't find the default branch of $url."
+  check_branch "$BRANCH" || exit 1
 
   conf=$SHIPIT_ETC/apps/$APP.conf
   app_conf_text >"$DEPLOY_TMP/app.conf"
@@ -368,7 +503,32 @@ deploy_folders() {
   install -d -m 750 -o root -g adm "$logs/builds"
   ensure_file "$logs/access.log" caddy:adm 640
   install -d -m 700 "/etc/$APP"
-  # S3: private repos get their deploy key here. S4: the database is created here.
+  # S4: the database is created here.
+}
+
+# Repo access (C): private repos only. Creates deployer's ed25519 key for the app if it's missing.
+# While the repo refuses it, prints the public key and where to add it, and retries every
+# KEY_RETRY_SECONDS. Ctrl-C stops it, and the next deploy picks up from here (the key is kept).
+deploy_repo_access() {
+  local key url
+  set_git_env
+  repo_uses_key "$REPO" || return 0
+  key=$(deploy_key_path)
+  # shellcheck disable=SC2016 # expanded by the deployer's bash
+  as_deployer bash -c 'umask 077; mkdir -p "${1%/*}"; [ -f "$1" ] || ssh-keygen -q -t ed25519 -N "" -C "$2" -f "$1"' \
+    keygen "$key" "shipit-$APP@$(hostname)" </dev/null || die "Creating the deploy key $key failed."
+  repo_ls_remote && return 0
+
+  url=$(deploy_key_url "$REPO")
+  if [ -n "$url" ]; then
+    log "Add this read-only deploy key to the repo at $url (leave \"Allow write access\" unticked):"
+  else
+    log "Add this public key as a read-only deploy key for $REPO:"
+  fi
+  printf '\n  %s\n\n' "$(as_deployer cat -- "$key.pub" </dev/null)"
+  log "Waiting for the repo to accept it (checking every $KEY_RETRY_SECONDS seconds; Ctrl-C stops, and the next deploy picks up from here)…"
+  until repo_ls_remote; do sleep "$KEY_RETRY_SECONDS"; done
+  log "The deploy key works."
 }
 
 # ---- D. The release ------------------------------------------------------------------------------
@@ -378,7 +538,7 @@ deploy_fetch() {
   local repo=$SHIPIT_OPT/$APP/repo sha release
   log "== Fetching $BRANCH from $REPO"
   # shellcheck disable=SC2016 # expanded by the deployer's bash
-  sha=$(as_deployer GIT_TERMINAL_PROMPT=0 bash -c '
+  sha=$(as_deployer "${GIT_ENV[@]}" bash -c '
     set -euo pipefail
     [ -f "$1/HEAD" ] || git init --quiet --bare "$1"
     git -C "$1" fetch --quiet --no-tags "$2" "refs/heads/$3"
@@ -397,25 +557,50 @@ deploy_fetch() {
     || die "Extracting $DEPLOY_SHA failed. See $BUILD_LOG"
 }
 
-# D3: the commands. S3: a release with deploy.conf uses it (sourced by deployer only).
+# D3: the commands. A release with deploy.conf uses it: deployer sources it to check it, and root reads
+# only the process names and HEALTH_PATH from a copy, as data. Otherwise the zero-config defaults.
 deploy_commands() {
-  [ ! -e "$RELEASE/deploy.conf" ] \
-    || die "This release has a deploy.conf, which shipit doesn't support yet. Remove it to deploy with zero config."
-  zero_config_check "$RELEASE" || exit 1
-  mapfile -t PROCESSES < <(release_processes "$RELEASE")
-  local p
+  local conf=$DEPLOY_TMP/deploy.conf out p
+  HEALTH_PATH=''
+  if release_has deploy.conf; then
+    release_cat deploy.conf >"$conf" || die "Reading the release's deploy.conf failed."
+    out=$(as_deployer PORT="$PORT" bash -c "$CONF_CHECK_SCRIPT" check "$RELEASE" 2>&1 </dev/null) || die "$out"
+    mapfile -t PROCESSES < <(conf_processes <"$conf")
+    HEALTH_PATH=$(conf_health_path <"$conf") || exit 1
+  else
+    zero_config_check "$RELEASE" || exit 1
+    PROCESSES=(web)
+  fi
   for p in "${PROCESSES[@]}"; do check_process_name "$p" || exit 1; done
-  [ "${#PROCESSES[@]}" -gt 0 ] || die "This release defines no process to run."
+  [ "${#PROCESSES[@]}" -gt 0 ] \
+    || die "deploy.conf defines no process to run. Add a line that starts with PROCESS_<name>=, like PROCESS_web=\"node server.js\"."
 }
 
-# D4: the env file. It only ever gains keys. S3: ask for missing .env.example keys here. S4: add
-# DATABASE_URL.
+# D4: the env file. It only ever gains keys: APP_URL, then a value for each key of the release's
+# .env.example it doesn't have yet, asked with hidden input. S4: add DATABASE_URL.
 deploy_env() {
-  local file=/etc/$APP/env
-  env_add_missing "$file" "APP_URL=https://$DOMAIN" >"$DEPLOY_TMP/env"
+  local file=/etc/$APP/env lines=("APP_URL=https://$DOMAIN") missing=() key value
+  env_add_missing "$file" "${lines[@]}" >"$DEPLOY_TMP/env"
   if install_if_changed "$DEPLOY_TMP/env" "$file" 600; then log "Wrote $file."; fi
   chown root:root "$file"
   env_file_lines "$file" >/dev/null || die "Fix it with: sudo shipit env $APP"
+
+  release_has .env.example || return 0
+  release_cat .env.example >"$DEPLOY_TMP/env.example" || die "Reading the release's .env.example failed."
+  mapfile -t missing < <(env_example_keys <"$DEPLOY_TMP/env.example" | env_missing_keys "$file")
+  [ "${#missing[@]}" -gt 0 ] || return 0
+  [ -t 0 ] || die "$file has no value for ${missing[*]} from .env.example, and there's no terminal to ask in. Add them with: sudo shipit env $APP, then re-run the deploy."
+  log "== $file needs a value for each new .env.example key (input is hidden; blank is allowed)"
+  for key in "${missing[@]}"; do
+    while :; do
+      ask_hidden "$key: " value || need_answer
+      check_env_value "$value" && break
+    done
+    lines+=("$key=$value")
+  done
+  env_add_missing "$file" "${lines[@]}" >"$DEPLOY_TMP/env"
+  install_if_changed "$DEPLOY_TMP/env" "$file" 600 || true
+  log "Added ${missing[*]} to $file."
 }
 
 # D5: INSTALL then BUILD as deployer, holding the shared build lock. Root reads the env file literally
@@ -514,7 +699,7 @@ health_code() {
   curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $DOMAIN" "http://127.0.0.1:$PORT$1" || true
 }
 
-# D11: poll for up to HEALTH_TIMEOUT seconds. S3: HEALTH_PATH comes from deploy.conf and is strict.
+# D11: poll for up to HEALTH_TIMEOUT seconds. HEALTH_PATH (from deploy.conf) makes it strict.
 deploy_health() {
   local path=${HEALTH_PATH:-/} strict=${HEALTH_PATH:+1} code deadline=$((SECONDS + HEALTH_TIMEOUT))
   log "== Checking http://127.0.0.1:$PORT$path"
@@ -552,6 +737,7 @@ cmd_deploy() {
   log "== Setting up $APP"
   deploy_user
   deploy_folders
+  deploy_repo_access
   BUILD_LOG=$LOG_ROOT/$APP/builds/deploy-$DEPLOY_UTC.log
   ensure_file "$BUILD_LOG" root:adm 640
   prune_build_logs "$LOG_ROOT/$APP/builds" "$BUILD_LOGS_KEEP"
