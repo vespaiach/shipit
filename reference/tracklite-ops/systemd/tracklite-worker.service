@@ -1,0 +1,25 @@
+[Unit]
+Description=Tracklite worker (notification emails and cleanup)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=tracklite
+Group=tracklite
+WorkingDirectory=/opt/tracklite/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/tracklite/env
+ExecStart=/opt/tracklite/current/node_modules/.bin/tsx --conditions=react-server scripts/worker.ts
+# The worker finishes its current batch and exits on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Tracklite web (next start)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=tracklite
+Group=tracklite
+WorkingDirectory=/opt/tracklite/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/tracklite/env
+ExecStart=/opt/tracklite/current/node_modules/.bin/next start --hostname 127.0.0.1 --port 3000
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

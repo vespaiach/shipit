@@ -1,0 +1,31 @@
+# Installed as /etc/caddy/Caddyfile. TRACKLITE_DOMAIN comes from the caddy.service drop-in that
+# provision.sh writes. Caddy gets the TLS certificate and redirects HTTP to HTTPS on its own (SEC-005).
+
+{$TRACKLITE_DOMAIN} {
+	encode zstd gzip
+
+	# Design §4.9.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# Overwrite any client-sent X-Forwarded-For, so the rightmost entry the app reads for
+	# SEC-001's per-IP limit is always the real client.
+	reverse_proxy 127.0.0.1:3000 {
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# Access log to journald (kept 14 days, OPS-006), with the token left out of
+	# /invite and /reset-password addresses (SEC-007).
+	log {
+		output stderr
+		format filter {
+			request>uri query {
+				delete token
+			}
+		}
+	}
+}
