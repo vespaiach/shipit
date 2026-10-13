@@ -4,7 +4,7 @@
 # functions.
 #
 # The rollback steps (switch_back) live here too, because HEALTH_FAIL=rollback runs them from D11;
-# lib/rollback.sh sources this file. Milestone seam, marked "S7:" below: the backup timer.
+# lib/rollback.sh sources this file.
 
 CADDY_SITES=/etc/caddy/sites
 CADDYFILE=/etc/caddy/Caddyfile
@@ -873,8 +873,23 @@ deploy_units_and_site() {
       log "Caddy wasn't reloaded, because $CADDYFILE isn't shipit's yet. Switch to $CADDYFILE.shipit (sudo shipit setup says how) to serve $DOMAIN."
     fi
   fi
-  # S7: enable shipit-backup@<app>.timer when DATABASE is set. Not before: until libexec/backup exists
-  # the timer's service would fail every night.
+  deploy_backups
+}
+
+# D7 (end): an app with a DATABASE gets its backup folder (postgres:postgres 700) and an enabled
+# shipit-backup@<app>.timer. Without one, a timer left enabled from before is disabled; its dumps stay.
+deploy_backups() {
+  local timer=shipit-backup@$APP.timer
+  if [ -z "$DATABASE" ]; then
+    systemctl is-enabled --quiet "$timer" 2>/dev/null || return 0
+    systemctl disable --quiet --now "$timer" || die "Disabling $timer failed."
+    log "Disabled $timer, because $APP has no DATABASE now. Its dumps stay in $BACKUP_ROOT/$APP."
+    return 0
+  fi
+  install -d -m 700 -o postgres -g postgres "$BACKUP_ROOT/$APP" || die "Creating $BACKUP_ROOT/$APP failed."
+  systemctl is-enabled --quiet "$timer" 2>/dev/null && return 0
+  systemctl enable --quiet --now "$timer" || die "Enabling $timer failed."
+  log "Enabled $timer: daily backups of $DATABASE to $BACKUP_ROOT/$APP."
 }
 
 # D8: point current, then previous, at their releases, each atomically.

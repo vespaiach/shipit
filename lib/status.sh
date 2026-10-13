@@ -7,9 +7,6 @@
 # shellcheck source=lib/deploy.sh
 . "${BASH_SOURCE[0]%/*}/deploy.sh"
 
-# Where libexec/backup (S7) writes each app's dumps: $BACKUP_ROOT/<app>/<app>-<UTC>.dump.
-BACKUP_ROOT=/var/backups/shipit
-
 # ---- Formatting (unit-tested) --------------------------------------------------------------------
 
 # status_line <label> <text>: one indented line of an app's block.
@@ -76,16 +73,15 @@ status_release() {
 }
 
 status_backup() {
-  local files last='none yet' result
+  local last result
   if [ -z "$DATABASE" ]; then
     status_line backup "none: $APP has no database"
     return 0
   fi
-  files=("$BACKUP_ROOT/$APP/$APP"-*.dump)
-  [ ! -e "${files[0]}" ] || last=${files[${#files[@]} - 1]##*/}
+  last=$(backup_files "$APP" | tail -n 1)
   result=$(systemctl show -p Result -p ExecMainExitTimestamp "shipit-backup@$APP.service" 2>/dev/null \
     | backup_result)
-  status_line backup "$last (last run: $result)"
+  status_line backup "${last:-none yet} (last run: $result)"
 }
 
 # status_app: the block for APP.

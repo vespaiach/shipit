@@ -72,7 +72,8 @@ shipit/
 │   ├── status.sh
 │   ├── logs.sh
 │   ├── env.sh
-│   └── restore.sh               (`shipit backup` is one line in bin/shipit)
+│   ├── backup.sh                `systemctl start shipit-backup@<app>.service`, then the new file's name and size
+│   └── restore.sh
 ├── libexec/                     run by systemd, never by people
 │   ├── run                      process launcher
 │   └── backup                   pg_dump to /var/backups/shipit/<app>, then prune
@@ -190,7 +191,7 @@ The app's secrets. `deploy` creates it with `DATABASE_URL` and `APP_URL` plus yo
 | env value | No newline, no quote or backslash, no leading or trailing whitespace | systemd and the build read the file literally, so these characters would mean different things to them. |
 | any file the tool sources from `/etc/shipit` | Owned by root and not writable by group or others | Root sources these files. A writable one would run someone else's code as root. |
 
-**Test seams.** `common.sh` sets plain constants (`DEPLOY_USER=deployer`, `SHIPIT_ETC=/etc/shipit`, `SHIPIT_VAR=/var/lib/shipit`, `SHIPIT_OPT=/opt`). Unit tests source `common.sh` and reassign them. They aren't read from the environment and there are no flags for them. The lock helpers take the lock file's path as an argument. Tests stub `getent`, `ss` and `systemctl` through `PATH`.
+**Test seams.** `common.sh` sets plain constants (`DEPLOY_USER=deployer`, `SHIPIT_ETC=/etc/shipit`, `SHIPIT_VAR=/var/lib/shipit`, `SHIPIT_OPT=/opt`, `BACKUP_ROOT=/var/backups/shipit`). Unit tests source `common.sh` and reassign them. They aren't read from the environment and there are no flags for them. The lock helpers take the lock file's path as an argument. Tests stub `getent`, `ss` and `systemctl` through `PATH`.
 
 ## 3. Commands
 
@@ -239,7 +240,7 @@ Output: a summary of what changed, a warning if RAM plus swap is below 4 GB, and
 4. **Env file.** Read the key names from the release's `.env.example` (`grep -E '^[A-Z_][A-Z0-9_]*='`; comments, indented and `export` lines are ignored, and example values are never used). Ask for any key that `/etc/<app>/env` doesn't have, except `PORT` and `NODE_ENV` (the unit sets them, and the env file would override it), then write the file (render to a temp file, then `install -m 600`).
 5. **Build**, holding the shared build lock: `flock /var/lib/shipit/build.lock`. If it has to wait, it prints `Waiting for another app's build…`. Runs `INSTALL` then `BUILD` as `deployer`, with the env file and `PORT` exported. The build log records when the lock was taken and released.
 6. **Migrate**, if there's a `MIGRATE` command. On failure, print `Migrations failed, so nothing was switched. Still serving <old>.`, delete the release, and exit 1.
-7. **Units and site.** Render `<app>@.service`, `<app>.target` (whose `Wants=` lists the release's processes) and `sites/<app>.caddy` to temp files. Create an empty `sites/<app>.extra` if it's missing (it's never overwritten). Validate with `systemd-analyze verify` and `caddy validate`, with the new site in place. Install only the files that changed, then run `daemon-reload` and `enable <app>.target`. Reload Caddy if the site changed and the root Caddyfile is shipit's. Enable `shipit-backup@<app>.timer` if `DATABASE` is set. If any validation fails, the old files stay, the release is deleted, and the command exits 1.
+7. **Units and site.** Render `<app>@.service`, `<app>.target` (whose `Wants=` lists the release's processes) and `sites/<app>.caddy` to temp files. Create an empty `sites/<app>.extra` if it's missing (it's never overwritten). Validate with `systemd-analyze verify` and `caddy validate`, with the new site in place. Install only the files that changed, then run `daemon-reload` and `enable <app>.target`. Reload Caddy if the site changed and the root Caddyfile is shipit's. If `DATABASE` is set, create `/var/backups/shipit/<app>/` (`postgres:postgres` 700) and enable and start `shipit-backup@<app>.timer`; if it's empty, disable a timer left enabled from before (its dumps are kept). If any validation fails, the old files stay, the release is deleted, and the command exits 1.
 8. **Switch.** Point `current` and then `previous` at their releases, each atomically with `mv -T`.
 9. **Restart** `<app>.target`. `PartOf=` passes the restart on to every process. Instances the release no longer lists are stopped.
 10. **Prune** every release except `current` and `previous`.
@@ -277,11 +278,11 @@ Takes the app lock, so it can't race a deploy or rollback. Opens a private copy 
 
 ### `shipit backup <app>`
 
-Runs `systemctl start shipit-backup@<app>.service`, then prints the new file's name and size.
+Runs `systemctl start shipit-backup@<app>.service`, then prints the new file's name and size. It refuses an app without a `DATABASE`, or one whose backup folder no deploy has made yet. It lives in `lib/backup.sh`, like every other command, because `restore` reuses it.
 
 ### `shipit restore <app> [file | latest]`
 
-Asks you to type the app name to confirm. Then it takes a fresh backup first, stops `<app>.target`, runs `pg_restore --clean --if-exists --no-owner --role=<app> --dbname <db>` from the chosen file in `/var/backups/shipit/<app>/`, and starts the target again.
+Asks you to type the app name to confirm, so it refuses to run without a terminal. The file must be one of the app's dump names (`<app>-<YYYYmmddTHHMMSSZ>.dump`, no path) in `/var/backups/shipit/<app>/`; `latest` (the default) is the newest, chosen before the fresh backup. Holding the app lock, it takes a fresh backup first, stops `<app>.target`, runs `pg_restore --clean --if-exists --no-owner --role=<app> --single-transaction --dbname <db>` as `postgres` from the chosen file, and starts the target again, also when the restore fails. `--single-transaction` means a failed restore leaves the database as it was.
 
 ### `libexec/run <app> <process>` — the launcher, run by systemd as `<app>`
 
@@ -293,7 +294,7 @@ Asks you to type the app name to confirm. Then it takes a fresh backup first, st
 
 ### `libexec/backup <app>` — run by `shipit-backup@<app>.service` as `postgres`
 
-Reads `DATABASE` from the app config and writes `pg_dump --format=custom` to a temp file in `/var/backups/shipit/<app>/`. It then renames the file to `<app>-<YYYYmmddTHHMMSSZ>.dump`, so a half-written dump never has a real name, and deletes all but the newest `BACKUP_KEEP`. A failed backup shows up in `shipit status`. No email is sent.
+Reads `DATABASE` from the app config as data (the last `DATABASE=` line, which must hold a plain name, optionally quoted or followed by a comment, after the ownership check) and `BACKUP_KEEP` from `host.conf` (the unit's `EnvironmentFile=`), and writes `pg_dump --format=custom` to a temp file in `/var/backups/shipit/<app>/`. It then renames the file to `<app>-<YYYYmmddTHHMMSSZ>.dump`, so a half-written dump never has a real name, and deletes all but the newest `BACKUP_KEEP`. A failed backup shows up in `shipit status`. No email is sent.
 
 ## 4. Generated files
 

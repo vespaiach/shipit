@@ -6,12 +6,10 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S6. `shipit setup` works, and `shipit deploy` deploys public or private
-> GitHub repos, zero-config Next.js apps or apps with a `deploy.conf`, asks for `.env.example` keys,
-> creates a PostgreSQL database per app and runs `MIGRATE`. Redeploys (`--ref`, config changes,
-> `HEALTH_FAIL`), `shipit rollback`, `status`, `logs` and `env` work. No backups yet (the backup timer
-> is enabled from S7): `backup` and `restore` say they aren't implemented yet.
-> See the milestones in plan §8.
+> **Status:** milestones S0–S7 are implemented: `setup`, `deploy` (public or private repos,
+> zero-config Next.js or `deploy.conf`, `.env.example` prompts, a PostgreSQL database per app,
+> migrations, redeploys), `rollback`, `status`, `logs`, `env`, `backup` and `restore`. S5.5 and S7.5,
+> moving Tracklite onto shipit by hand (plan §6), aren't done yet. See the milestones in plan §8.
 
 ## Quick start
 
@@ -109,6 +107,20 @@ private copy of `/etc/<app>/env` in `$EDITOR` (`nano` by default; `sudo` usually
 it: `KEY=value`, blank lines and `#` or `;` comments, and the env-value rule. A bad line is named, and
 you can edit again or give up (nothing is changed). A changed file is installed as `root:root` 600 and
 `<app>.target` is restarted; an unchanged one restarts nothing.
+
+**Backups.** Deploying an app with a `DATABASE` creates `/var/backups/shipit/<app>/`
+(`postgres:postgres` 700) and enables `shipit-backup@<app>.timer`, which runs daily around 03:00 UTC
+(an app whose `DATABASE` is emptied gets its timer disabled on the next deploy; its dumps stay). The
+backup runs as `postgres`: `pg_dump --format=custom` to a temp file, renamed to
+`<app>-<YYYYmmddTHHMMSSZ>.dump` only when the dump succeeded, then all but the newest `BACKUP_KEEP`
+(from `host.conf`, 14 by default) are deleted. A failed run leaves no dump and shows in `shipit status`.
+`sudo shipit backup <app>` takes one now and prints its name and size. `sudo shipit restore <app>
+[file | latest]` asks you to type the app name (so it needs a terminal), then, holding the app lock,
+takes a fresh backup, stops `<app>.target`, restores the chosen dump (a file name from the app's backup
+folder, or the newest one) with `pg_restore --clean --if-exists --no-owner --role=<app>
+--single-transaction`, and starts the target again, also when the restore fails (which leaves the
+database as it was). The backups are on the VPS's own disk, so use Hostinger's snapshots or backups as
+the off-site copy.
 
 **Migrations.** `MIGRATE` (from `deploy.conf`, or `npm run db:migrate` for a zero-config app whose
 `package.json` has that script) runs as `deployer` after the build and before the switch, with the env

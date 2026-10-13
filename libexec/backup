@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# libexec/backup <app> (plan §3): run by shipit-backup@<app>.service as postgres, with host.conf's
+# BACKUP_KEEP in the environment. Dumps the app's DATABASE with pg_dump --format=custom to a temp file in
+# $BACKUP_ROOT/<app>/, renames it to <app>-<YYYYmmddTHHMMSSZ>.dump only when pg_dump succeeded (so a
+# half-written dump never has a real name), then deletes all but the newest BACKUP_KEEP dumps. A failure
+# exits non-zero, which the unit's Result (and so shipit status) shows.
+
+# shellcheck source=lib/common.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+BACKUP_TMP=''
+
+# backup_database <app config>: prints DATABASE from the config, read as data rather than sourced: the
+# last line that starts with DATABASE=, holding a plain name (optionally quoted, or followed by a #
+# comment) or nothing. Any other value is refused, so this can't read it differently from deploy.
+backup_database() {
+  local line value LC_ALL=C
+  line=$(grep -E '^DATABASE=' -- "$1" | tail -n 1) || true
+  value=${line#DATABASE=}
+  if ! [[ $value =~ ^(\"([a-z0-9_]*)\"|\'([a-z0-9_]*)\'|([a-z0-9_]*))([[:space:]]+#.*)?[[:space:]]*$ ]]; then
+    err "$1: DATABASE must be a plain database name, or empty."
+    return 1
+  fi
+  value=${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}
+  if [ -n "$value" ] && ! [[ $value =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
+    err "$1: invalid DATABASE '$value'."
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+# backup_prune <app> <keep>: deletes all but the newest <keep> of the app's dumps. Temp files and other
+# names in the folder are left alone.
+backup_prune() {
+  local names=() i
+  mapfile -t names < <(backup_files "$1")
+  for ((i = 0; i < ${#names[@]} - $2; i++)); do
+    rm -f -- "$BACKUP_ROOT/$1/${names[i]}"
+    log "Deleted ${names[i]}."
+  done
+}
+
+backup_exit() {
+  [ -z "$BACKUP_TMP" ] || rm -f -- "$BACKUP_TMP"
+}
+
+backup() {
+  local app=${1-} conf db dir name
+  check_app_name "$app" || exit 1
+  check_number BACKUP_KEEP "${BACKUP_KEEP-}" || die "Set BACKUP_KEEP in $SHIPIT_ETC/host.conf."
+  conf=$SHIPIT_ETC/apps/$app.conf
+  check_sourced_file "$conf" || exit 1
+  db=$(backup_database "$conf") || exit 1
+  [ -n "$db" ] || die "$app has no DATABASE in $conf, so there's nothing to back up."
+  dir=$BACKUP_ROOT/$app
+
+  umask 077
+  trap backup_exit EXIT
+  BACKUP_TMP=$(mktemp "$dir/.dump-XXXXXX") || die "Can't write to $dir."
+  pg_dump --format=custom --file="$BACKUP_TMP" "$db" || die "pg_dump $db failed, so no backup was written."
+  name=$app-$(date -u +%Y%m%dT%H%M%SZ).dump
+  mv -f -- "$BACKUP_TMP" "$dir/$name" || die "Renaming the dump to $dir/$name failed."
+  BACKUP_TMP=''
+  log "Wrote $dir/$name ($(wc -c <"$dir/$name" | tr -d ' ') bytes)."
+  backup_prune "$app" "$BACKUP_KEEP"
+}
+
+# Run only when executed; the unit tests source this file and call backup.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  set -euo pipefail
+  backup "$@"
+fi

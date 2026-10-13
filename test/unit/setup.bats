@@ -143,10 +143,11 @@ matches() {
 
 @test "backup units pass systemd-analyze verify" {
   command -v systemd-analyze >/dev/null || skip "systemd-analyze isn't installed"
-  # libexec/backup arrives in S7, so point ExecStart at /bin/true here.
+  # The checkout's libexec/backup stands in for the installed one.
   d=$BATS_TEST_TMPDIR/units
   mkdir -p "$d"
-  sed 's|^ExecStart=.*|ExecStart=/bin/true %i|' "$tpl/shipit-backup@.service" >"$d/shipit-backup@.service"
+  sed "s|/usr/local/lib/shipit/libexec/backup|$REPO_ROOT/libexec/backup|" "$tpl/shipit-backup@.service" \
+    >"$d/shipit-backup@.service"
   cp "$tpl/shipit-backup@.timer" "$d/"
   run systemd-analyze verify "$d/shipit-backup@.service" "$d/shipit-backup@.timer"
   [ "$status" -eq 0 ] || {

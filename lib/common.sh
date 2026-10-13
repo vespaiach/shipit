@@ -11,6 +11,8 @@ SHIPIT_VAR=/var/lib/shipit
 SHIPIT_OPT=/opt
 # The owner every file root sources from SHIPIT_ETC must have. Tests set it to their own uid.
 SHIPIT_OWNER_UID=0
+# Where libexec/backup writes each app's dumps: $BACKUP_ROOT/<app>/<app>-<YYYYmmddTHHMMSSZ>.dump.
+BACKUP_ROOT=/var/backups/shipit
 
 # Where render's templates live: templates/ next to lib/, in a checkout and when installed.
 SHIPIT_TEMPLATES=${BASH_SOURCE[0]%/*}/../templates
@@ -266,6 +268,24 @@ allocate_port() {
   done
   err "No free port from $FIRST_APP_PORT to 65535."
   return 1
+}
+
+# ---- Backups -------------------------------------------------------------------------------------
+
+# is_backup_name <app> <name>: whether name is one of the app's dumps, <app>-<YYYYmmddTHHMMSSZ>.dump.
+# A path, a temp file or any other name isn't. <app> must already be a valid app name.
+is_backup_name() {
+  local LC_ALL=C
+  [[ $2 =~ ^$1-[0-9]{8}T[0-9]{6}Z\.dump$ ]]
+}
+
+# backup_files <app>: the names of the app's dumps in $BACKUP_ROOT/<app>, oldest first (the names sort
+# by time).
+backup_files() {
+  local f LC_ALL=C
+  for f in "$BACKUP_ROOT/$1/$1"-*.dump; do
+    if is_backup_name "$1" "${f##*/}" && [ -f "$f" ]; then printf '%s\n' "${f##*/}"; fi
+  done
 }
 
 # ---- Files, users and prompts --------------------------------------------------------------------
