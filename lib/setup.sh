@@ -99,10 +99,6 @@ merge_known_hosts() {
   cat "$2"
 }
 
-is_shipit_file() {
-  head -n 3 -- "$1" | grep "^$MANAGED_MARKER" >/dev/null
-}
-
 # is_package_default <file> <package>: the file is the package's conffile, unmodified.
 is_package_default() {
   local sum
@@ -164,19 +160,6 @@ load_host_conf() {
   fi
 }
 
-check_number() {
-  [[ $2 =~ ^[1-9][0-9]*$ ]] && return 0
-  err "Invalid $1 '$2'."
-  return 1
-}
-
-# ask <prompt> <var>: reads one answer. Fails when input runs out with nothing typed.
-ask() {
-  local reply
-  read -r -p "$1" reply || [ -n "$reply" ] || return 1
-  printf -v "$2" '%s' "$reply"
-}
-
 ask_host_questions() {
   while :; do
     ask 'Email for TLS certificate notices (blank for none): ' ACME_EMAIL || return 1
@@ -190,20 +173,6 @@ ask_host_questions() {
 }
 
 # ---- Host helpers --------------------------------------------------------------------------------
-
-# install_if_changed <new file> <dest> <mode>: installs only when the content differs. Fails (1) when
-# there was nothing to change.
-install_if_changed() {
-  if [ -f "$2" ] && cmp -s "$1" "$2"; then
-    chmod "$3" "$2"
-    return 1
-  fi
-  install -m "$3" "$1" "$2"
-}
-
-user_home() {
-  getent passwd "$1" | cut -d: -f6
-}
 
 apt_get() {
   DEBIAN_FRONTEND=noninteractive apt-get -q -y -o Dpkg::Options::=--force-confold "$@"
@@ -430,7 +399,8 @@ setup_folders() {
     [ -d "$dir" ] || note_change "Created $dir"
   done
   install -d -m 755 "$SHIPIT_VAR"
-  install -d -m 750 -o root -g adm /var/log/shipit
+  # 751: caddy (not in adm) must reach each app's access.log, but nobody else can list the folder.
+  install -d -m 751 -o root -g adm /var/log/shipit
   # 711: postgres must reach its own /var/backups/shipit/<app>, but can't list the others.
   install -d -m 711 /var/backups/shipit
 }

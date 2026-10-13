@@ -1,0 +1,26 @@
+# managed by shipit
+[Unit]
+Description=tracklite %i
+PartOf=tracklite.target
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracklite
+Group=tracklite
+WorkingDirectory=/opt/tracklite/current
+Environment=NODE_ENV=production PORT=3001
+EnvironmentFile=/etc/tracklite/env
+ExecStart=/usr/local/lib/shipit/libexec/run tracklite %i
+StandardOutput=append:/var/log/shipit/tracklite/%i.log
+StandardError=append:/var/log/shipit/tracklite/%i.error.log
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true

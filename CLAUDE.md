@@ -11,10 +11,13 @@ keep it, README.md and this file in step with the code.
   doesn't exist yet prints `shipit <command> is not implemented yet.` Adding a command's library is
   all it takes to wire it up.
 - `lib/common.sh` — `log`/`err`/`die`, the validators (`check_*`), config reads (`conf_get`,
-  `app_using`), `app_name_from_repo`, `allocate_port`, locks (`lock_try`/`lock_wait`/`lock_release`)
-  and `render`.
-- `lib/<command>.sh` — one file per command, defining `cmd_<command>`. `libexec/` holds what systemd
-  runs; `templates/` (`$SHIPIT_TEMPLATES`) holds what `render` fills in. `lib/setup.sh` keeps the
+  `app_using`), `app_name_from_repo`, `allocate_port`, file and prompt helpers (`install_if_changed`,
+  `is_shipit_file`, `user_home`, `ask`), locks (`lock_try`/`lock_wait`/`lock_release`) and `render`.
+- `lib/<command>.sh` — one file per command, defining `cmd_<command>`. `lib/deploy.sh` follows plan
+  §3's A–D steps (`deploy_*` functions, called in order by `cmd_deploy`) and marks where S3–S5 slot
+  in with `S3:`/`S4:`/`S5:` comments. `libexec/` holds what systemd runs: `libexec/run` is the
+  launcher, and it runs `launch "$@"` only when executed, so the tests source it and call `launch`.
+  `templates/` (`$SHIPIT_TEMPLATES`) holds what `render` fills in. `lib/setup.sh` keeps the
   host-touching steps (`setup_*`) thin and puts the logic in small stdin/argument-driven helpers
   (`node_lts_major`, `sshd_ports`, `session_used_key`, `is_replaceable`, …) that the unit tests call.
 - `install.sh` — copies `bin lib libexec templates` to `/usr/local/lib/shipit`, links
@@ -30,14 +33,15 @@ keep it, README.md and this file in step with the code.
   `install.sh`, `libexec/*`), never in libraries.
 - **Libraries are side-effect free when sourced**: only constants and functions. Tests source them.
 - **Test seams are plain constants** in `common.sh` (`DEPLOY_USER`, `SHIPIT_ETC`, `SHIPIT_VAR`,
-  `SHIPIT_OWNER_UID`). Never read them from the environment or add flags for them. Tests reassign
-  them after sourcing. Lock helpers take the lock path. Tests stub `getent`, `ss`, `systemctl` and
+  `SHIPIT_OPT`, `SHIPIT_OWNER_UID`). Never read them from the environment or add flags for them.
+  Tests reassign them after sourcing. Lock helpers take the lock path. Tests stub `getent`, `ss`, `systemctl` and
   `id` through `PATH`, so call those commands by name (no absolute paths, no `$EUID`).
 - **Validators** are `check_<thing> <value> [app]`: silent on success, print the reason to stderr and
   return 1 on failure. Validate every value read from a config or typed by a person before using it.
 - **Root never runs or sources repo content.** Read repo files as data only (`grep -E` with strict
-  patterns, `jq`, `git show` as `$DEPLOY_USER`). Root sources only files under `$SHIPIT_ETC`, and only
-  after `check_sourced_file` (or via `conf_get`, which does it).
+  patterns, `jq`, `git show` as `$DEPLOY_USER`). Repo commands run through `as_deployer` (clean
+  environment, from `/`); secrets reach the build on stdin, never on a command line. Root sources
+  only files under `$SHIPIT_ETC`, and only after `check_sourced_file` (or via `conf_get`, which does it).
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
   printing nothing, on an unset or empty variable. Never `sed` values into files.
 - **Validate on a temp copy, then install**: render to a temp file, check it (`visudo -cf`,

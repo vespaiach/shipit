@@ -1,0 +1,7 @@
+# managed by shipit — Wants= lists the release's processes
+[Unit]
+Description=${APP} (all processes)
+Wants=${WANTS}
+
+[Install]
+WantedBy=multi-user.target

@@ -56,7 +56,7 @@ grep -q email /etc/caddy/Caddyfile && fail "the Caddyfile has an email line with
 systemctl is-active --quiet caddy || fail "caddy isn't running"
 
 # Folders, rotation, backup units
-[ "$(stat -c '%U %G %a' /var/log/shipit)" = 'root adm 750' ] || fail "/var/log/shipit"
+[ "$(stat -c '%U %G %a' /var/log/shipit)" = 'root adm 751' ] || fail "/var/log/shipit"
 [ "$(stat -c '%U %a' /var/backups/shipit)" = 'root 711' ] || fail "/var/backups/shipit"
 [ -d /var/lib/shipit ] || fail "/var/lib/shipit"
 grep -q 'rotate 14' /etc/logrotate.d/shipit || fail "logrotate"

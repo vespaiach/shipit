@@ -1,0 +1,26 @@
+# managed by shipit
+[Unit]
+Description=${APP} %i
+PartOf=${APP}.target
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP}
+Group=${APP}
+WorkingDirectory=/opt/${APP}/current
+Environment=NODE_ENV=production PORT=${PORT}
+EnvironmentFile=/etc/${APP}/env
+ExecStart=/usr/local/lib/shipit/libexec/run ${APP} %i
+StandardOutput=append:/var/log/shipit/${APP}/%i.log
+StandardError=append:/var/log/shipit/${APP}/%i.error.log
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=78
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true

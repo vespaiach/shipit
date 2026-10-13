@@ -46,3 +46,31 @@ etc_checksums() {
 # setup sleeps first in SSH sessions, so journald has the session's "Accepted publickey" line.
 # shellcheck disable=SC2034 # used by the scenarios that source this file
 SETUP_OVER_SSH='sleep 2; shipit setup'
+
+# make_repo <name> <fixture dir>: a bare repo at /srv/git/<name>.git holding the fixture as one commit
+# on main, owned by deployer (git refuses to fetch from a repo another user owns). Prints its file://
+# URL.
+make_repo() {
+  local name=$1 src=$2 work
+  work=$(mktemp -d)
+  cp -R "$src/." "$work/"
+  git -C "$work" init -q -b main
+  git -C "$work" add -A
+  git -C "$work" -c user.name=e2e -c user.email=e2e@localhost commit -q -m fixture
+  rm -rf "/srv/git/$name.git"
+  install -d -m 755 /srv/git
+  git clone -q --bare "$work" "/srv/git/$name.git"
+  rm -rf "$work"
+  chown -R deployer: "/srv/git/$name.git"
+  printf 'file:///srv/git/%s.git\n' "$name"
+}
+
+# short_sha <name>: the 7-character sha of main in /srv/git/<name>.git.
+short_sha() {
+  git -c safe.directory='*' -C "/srv/git/$1.git" rev-parse --short=7 main
+}
+
+# served <domain>: prints the page Caddy serves for the domain over HTTPS (Caddy's own CA for *.localhost).
+served() {
+  curl -fsSk --max-time 20 --resolve "$1:443:127.0.0.1" "https://$1/"
+}

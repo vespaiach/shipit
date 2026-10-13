@@ -307,3 +307,43 @@ x"; do
     }
   done
 }
+
+@test "branch: accepts usual branch names" {
+  for b in main master develop release/1.2 feature_x v2.0; do
+    run check_branch "$b"
+    [ "$status" -eq 0 ] || {
+      echo "refused $b"
+      return 1
+    }
+  done
+}
+
+@test "branch: refuses names git or a shell would misread" {
+  for b in '' -main 'a..b' 'main/' main.lock 'a b' 'main;rm' '$(id)' .hidden; do
+    run check_branch "$b"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $b"
+      return 1
+    }
+  done
+}
+
+@test "redact query: accepts names separated by single spaces" {
+  for q in token 'token code' 'a.b x-y z_1'; do
+    run check_redact_query "$q"
+    [ "$status" -eq 0 ] || {
+      echo "refused $q"
+      return 1
+    }
+  done
+}
+
+@test "redact query: refuses anything that could break the Caddy site" {
+  for q in '' ' token' 'token ' 'a  b' 'a}' 'a{' '*' 'a;b' $'a\nb'; do
+    run check_redact_query "$q"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $q"
+      return 1
+    }
+  done
+}

@@ -18,7 +18,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== Launching $vm"
-incus launch images:debian/13 "$vm" --vm
+# 4 GiB of RAM, like a KVM 1: the default 1 GiB is too little for a next build.
+incus launch images:debian/13 "$vm" --vm -c limits.cpu=2 -c limits.memory=4GiB
 for _ in $(seq 60); do
   incus exec "$vm" -- true 2>/dev/null && break
   sleep 2
