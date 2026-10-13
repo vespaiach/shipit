@@ -10,8 +10,8 @@ url=$(make_repo node-app test/fixtures/node-app)
 sha=$(short_sha node-app)
 env=/etc/node_app/env
 
-# First deploy, in a terminal: the domain, then GREETING and API_TOKEN (hidden input).
-out=$(printf 'node-app.localhost\nhello there\ns3cret-token\n' | in_terminal "shipit deploy $url" 2>&1) || {
+# First deploy, in a terminal: the domain, no database, then GREETING and API_TOKEN (hidden input).
+out=$(printf 'node-app.localhost\n\nhello there\ns3cret-token\n' | in_terminal "shipit deploy $url" 2>&1) || {
   echo "$out"
   fail "the first deploy failed"
 }

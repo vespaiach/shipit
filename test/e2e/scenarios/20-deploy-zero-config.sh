@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Zero-config Next app, first deploy: one domain answer is enough. It ends `Deployed <sha>`, `current`
+# Zero-config Next app, first deploy: one domain answer (and Enter for the database question) is enough. It ends `Deployed <sha>`, `current`
 # is that sha, / is served through Caddy, and web.log has lines in it.
 set -euo pipefail
 # shellcheck source=test/e2e/helpers.sh
@@ -9,7 +9,7 @@ set -euo pipefail
 url=$(make_repo next-app test/fixtures/next-app)
 sha=$(short_sha next-app)
 
-out=$(printf 'next-app.localhost\n' | shipit deploy "$url" 2>&1) || {
+out=$(printf 'next-app.localhost\n\n' | shipit deploy "$url" 2>&1) || {
   echo "$out"
   fail "the first deploy failed"
 }
@@ -23,6 +23,7 @@ for line in "REPO=$url" BRANCH=main DOMAIN=next-app.localhost PORT=3001 HEALTH_F
 done
 [ "$(stat -c '%U %G %a' /etc/next_app/env)" = 'root root 600' ] || fail "env file perms"
 grep -qx 'APP_URL=https://next-app.localhost' /etc/next_app/env || fail "env file has no APP_URL"
+grep -qx "DATABASE=''" "$conf" || fail "$conf has a database"
 grep -q DATABASE_URL /etc/next_app/env && fail "env file has a DATABASE_URL without a database"
 
 [ "$(getent passwd next_app | cut -d: -f5,7)" = 'shipit app:/usr/sbin/nologin' ] || fail "the next_app user"

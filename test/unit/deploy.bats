@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2016,SC2034 # single-quoted stub bodies and file contents; tests set lib variables
+# shellcheck disable=SC2016,SC2030,SC2031,SC2034 # single-quoted stub bodies and file contents; tests set lib variables
 # lib/deploy.sh: the unit, target and site templates against golden files and their validators, and
 # the small parsers and decisions deploy uses.
 
@@ -247,6 +247,7 @@ matches() {
 @test "app config round-trips through conf_get" {
   REPO='file:///srv/git/odd name&co.git'
   BRANCH=main
+  DATABASE=''
   app_conf_text >"$SHIPIT_ETC/apps/$APP.conf"
   chmod 644 "$SHIPIT_ETC/apps/$APP.conf"
   local f=$SHIPIT_ETC/apps/$APP.conf
@@ -256,6 +257,10 @@ matches() {
   [ "$(conf_get "$f" PORT)" = 3001 ]
   [ "$(conf_get "$f" HEALTH_FAIL)" = report ]
   [ -z "$(conf_get "$f" DATABASE)" ]
+  grep -qx "DATABASE=''" "$f"
+  DATABASE=tracklite
+  app_conf_text >"$f"
+  [ "$(conf_get "$f" DATABASE)" = tracklite ]
 }
 
 # ---- Env file ------------------------------------------------------------------------------------
@@ -507,7 +512,7 @@ deploy_commands_in() {
   [ "$output" = 'web|' ]
 }
 
-@test "D3: deploy.conf must set INSTALL, BUILD and a process, and not MIGRATE yet" {
+@test "D3: deploy.conf must set INSTALL, BUILD and a process; MIGRATE is optional" {
   local d=$BATS_TEST_TMPDIR/rel
   mkdir -p "$d"
   printf '%s\n' 'BUILD=b' >"$d/deploy.conf"
@@ -516,8 +521,8 @@ deploy_commands_in() {
   [ "$stderr" = 'deploy.conf must set INSTALL PROCESS_<name>.' ]
   printf '%s\n' 'INSTALL=i' 'BUILD=b' 'MIGRATE=m' 'PROCESS_web="x --port $PORT"' >"$d/deploy.conf"
   run --separate-stderr deploy_commands_in "$d"
-  [ "$status" -eq 1 ]
-  [[ $stderr == "deploy.conf sets MIGRATE"* ]]
+  [ "$status" -eq 0 ]
+  [ "$output" = 'web|' ]
 }
 
 @test "D3: a process only a computed line defines doesn't count" {
@@ -704,4 +709,235 @@ stub_deployer_home() {
   run repo_access_as ssh://git@localhost/home/git/a.git
   [ "$status" -eq 0 ]
   [ "$(cat "$BATS_TEST_TMPDIR/home/.ssh/shipit_$APP")" = old ]
+}
+
+# ---- Database ------------------------------------------------------------------------------------
+
+@test "database: package.json listing a PostgreSQL client or ORM defaults to yes" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local f=$BATS_TEST_TMPDIR/package.json dep
+  for dep in pg postgres drizzle-orm prisma @prisma/client; do
+    jq -n --arg d "$dep" '{dependencies: ({next: "16.0.0"} | .[$d] = "1.0.0")}' >"$f"
+    run package_wants_database "$f"
+    [ "$status" -eq 0 ] || {
+      echo "no database for $dep"
+      return 1
+    }
+  done
+  echo '{"devDependencies": {"prisma": "6.0.0"}}' >"$f"
+  run package_wants_database "$f"
+  [ "$status" -eq 0 ]
+}
+
+@test "database: the fixtures, other packages, and broken or missing files default to no" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local f=$BATS_TEST_TMPDIR/package.json body
+  run package_wants_database "$fixture/package.json"
+  [ "$status" -eq 1 ]
+  run package_wants_database "$node_fixture/package.json"
+  [ "$status" -eq 1 ]
+  for body in '{"dependencies": {"pg-promise-x": "1", "mysql": "1"}}' '{"scripts": {"pg": "x"}}' \
+    '{"peerDependencies": {"pg": "1"}}' 'not json' '[]' '{"dependencies": ["pg"]}'; do
+    printf '%s\n' "$body" >"$f"
+    run package_wants_database "$f"
+    [ "$status" -eq 1 ] || {
+      echo "database for $body"
+      return 1
+    }
+  done
+  run package_wants_database "$BATS_TEST_TMPDIR/missing.json"
+  [ "$status" -eq 1 ]
+}
+
+# ask_database_with <package.json or ''> <answers>: runs the question with the branch's package.json
+# stubbed, and prints DATABASE.
+ask_database_with() {
+  DEPLOY_TMP=$BATS_TEST_TMPDIR/tmp
+  mkdir -p "$DEPLOY_TMP"
+  if [ -n "$1" ]; then
+    eval "repo_package_json() { cat '$1'; }"
+  else
+    # shellcheck disable=SC2329 # called by ask_database
+    repo_package_json() { return 1; }
+  fi
+  ask_database <<<"$2"
+  printf 'DATABASE=%s\n' "$DATABASE"
+}
+
+@test "database question: Enter takes the default from package.json" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local f=$BATS_TEST_TMPDIR/package.json
+  echo '{"dependencies": {"drizzle-orm": "1", "postgres": "3"}}' >"$f"
+  run ask_database_with "$f" ''
+  [ "$output" = DATABASE=tracklite ]
+  run ask_database_with "$node_fixture/package.json" ''
+  [ "$output" = DATABASE= ]
+  run ask_database_with '' ''
+  [ "$output" = DATABASE= ]
+}
+
+@test "database question: an answer overrides the default, and anything else is asked again" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local f=$BATS_TEST_TMPDIR/package.json
+  echo '{"dependencies": {"pg": "8"}}' >"$f"
+  run ask_database_with "$f" 'n'
+  [ "$output" = DATABASE= ]
+  run ask_database_with "$fixture/package.json" $'maybe\nYes'
+  [ "$output" = DATABASE=tracklite ]
+}
+
+@test "database question: fails with no answer to read" {
+  DEPLOY_TMP=$BATS_TEST_TMPDIR
+  repo_package_json() { return 1; }
+  run --separate-stderr ask_database </dev/null
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"Run it in a terminal."* ]]
+}
+
+@test "SQL quoting: identifiers and literals double their own quote character" {
+  [ "$(sql_ident tracklite)" = '"tracklite"' ]
+  [ "$(sql_ident 'a"b')" = '"a""b"' ]
+  [ "$(sql_literal tracklite)" = "'tracklite'" ]
+  [ "$(sql_literal "it's")" = "'it''s'" ]
+  [ "$(sql_literal 'a"b')" = "'a\"b'" ]
+}
+
+@test "SQL: the role queries quote the name as a literal" {
+  [ "$(sql_role_exists tracklite)" = "SELECT 1 FROM pg_roles WHERE rolname = 'tracklite';" ]
+  [ "$(sql_database_owner user)" = "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'user';" ]
+}
+
+@test "SQL: the role is created with LOGIN and the password as a literal" {
+  [ "$(sql_create_role user 0a1b)" = "CREATE ROLE \"user\" LOGIN PASSWORD '0a1b';" ]
+}
+
+@test "SQL: database creation, revoke connect and grant match the golden file" {
+  matches database.sql sql_database tracklite tracklite
+}
+
+@test "SQL: names stay quoted inside the CREATE DATABASE string" {
+  run sql_database app 'odd"db'
+  [[ ${lines[0]} == "SELECT 'CREATE DATABASE \"odd\"\"db\" OWNER \"app\"' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'odd\"db')\\gexec" ]]
+}
+
+@test "DATABASE_URL uses TCP on loopback with the role's password" {
+  [ "$(database_url tracklite 0123abcd tracklite)" = postgresql://tracklite:0123abcd@127.0.0.1:5432/tracklite ]
+  check_env_value "$(database_url tracklite "$(db_password)" tracklite)"
+}
+
+@test "database password: 48 hex characters, different each time" {
+  local a b
+  a=$(db_password)
+  b=$(db_password)
+  [[ $a =~ ^[0-9a-f]{48}$ ]]
+  [ "$a" != "$b" ]
+}
+
+# ---- MIGRATE -------------------------------------------------------------------------------------
+
+@test "D3: zero config migrates only when package.json has a db:migrate script" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local d=$BATS_TEST_TMPDIR/rel
+  DEPLOY_TMP=$BATS_TEST_TMPDIR
+  RELEASE=$fixture
+  deploy_commands
+  [ "$MIGRATE" = '' ]
+  mkdir -p "$d"
+  jq '.scripts["db:migrate"] = "drizzle-kit migrate"' "$fixture/package.json" >"$d/package.json"
+  cp "$fixture/package-lock.json" "$d/"
+  RELEASE=$d
+  deploy_commands
+  [ "$MIGRATE" = 'npm run db:migrate' ]
+}
+
+@test "zero config: db:migrate detection reads scripts only" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  local f=$BATS_TEST_TMPDIR/package.json
+  run package_has_script "$node_fixture/package.json" db:migrate
+  [ "$status" -eq 0 ]
+  run package_has_script "$fixture/package.json" db:migrate
+  [ "$status" -eq 1 ]
+  echo '{"scripts": {"db:migrate:dev": "x"}, "db:migrate": "y"}' >"$f"
+  run package_has_script "$f" db:migrate
+  [ "$status" -eq 1 ]
+}
+
+@test "migrate: deploy.conf's MIGRATE runs with the env file's values, literally" {
+  local d=$BATS_TEST_TMPDIR/rel
+  mkdir -p "$d"
+  printf '%s\n' 'MIGRATE="echo migrate \"\$DATABASE_URL\" on $PORT"' >"$d/deploy.conf"
+  run env PORT=3005 bash -c "$MIGRATE_SCRIPT" migrate "$d" '' <<<'DATABASE_URL=postgresql://a:$(id)@127.0.0.1:5432/a'
+  [ "$status" -eq 0 ]
+  [ "$output" = $'== echo migrate "$DATABASE_URL" on 3005\nmigrate postgresql://a:$(id)@127.0.0.1:5432/a on 3005' ]
+}
+
+@test "migrate: zero config runs the default it's given, and nothing when there's none" {
+  local d=$BATS_TEST_TMPDIR/rel
+  mkdir -p "$d"
+  run bash -c "$MIGRATE_SCRIPT" migrate "$d" 'echo zero-config' </dev/null
+  [ "$output" = $'== echo zero-config\nzero-config' ]
+  run bash -c "$MIGRATE_SCRIPT" migrate "$d" '' </dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # A deploy.conf without MIGRATE runs nothing, whatever root passed.
+  printf '%s\n' 'INSTALL=i' >"$d/deploy.conf"
+  run bash -c "$MIGRATE_SCRIPT" migrate "$d" '' </dev/null
+  [ -z "$output" ]
+}
+
+# migrate_in <release>: runs D6 the way cmd_deploy does, with deploy_exit as the EXIT trap and the env
+# file stubbed.
+migrate_in() {
+  set -o pipefail
+  SHIPIT_OPT=$BATS_TEST_TMPDIR/opt
+  RELEASE=$1
+  DEPLOY_TMP=$BATS_TEST_TMPDIR/tmp
+  BUILD_LOG=$BATS_TEST_TMPDIR/build.log
+  mkdir -p "$DEPLOY_TMP"
+  # shellcheck disable=SC2329 # called by deploy_migrate
+  env_file_lines() { printf 'SECRET=x\n'; }
+  trap deploy_exit EXIT
+  deploy_migrate
+}
+
+# migrate_then_switch <release>: D6, then what a successful switch does, so deploy_exit keeps it.
+migrate_then_switch() {
+  migrate_in "$1"
+  SWITCHED=1
+}
+
+@test "migrate: a failing migration deletes the new release and leaves current alone" {
+  local opt=$BATS_TEST_TMPDIR/opt/$APP old new
+  old=$opt/releases/20260101T000000Z-aaaaaaa
+  new=$opt/releases/20260102T000000Z-bbbbbbb
+  mkdir -p "$old" "$new"
+  ln -s "$old" "$opt/current"
+  printf '%s\n' 'MIGRATE="echo migrating; exit 3"' >"$new/deploy.conf"
+  run --separate-stderr migrate_in "$new"
+  [ "$status" -eq 1 ]
+  [ "$stderr" = "Migrations failed, so nothing was switched. Still serving 20260101T000000Z-aaaaaaa. See $BATS_TEST_TMPDIR/build.log" ]
+  [ ! -e "$new" ]
+  [ -d "$old" ]
+  [ "$(readlink "$opt/current")" = "$old" ]
+  grep -qx migrating "$BATS_TEST_TMPDIR/build.log"
+}
+
+@test "migrate: a failing first migration deletes the release too" {
+  local new=$BATS_TEST_TMPDIR/opt/$APP/releases/20260102T000000Z-bbbbbbb
+  mkdir -p "$new"
+  printf '%s\n' 'MIGRATE="false"' >"$new/deploy.conf"
+  run --separate-stderr migrate_in "$new"
+  [ "$status" -eq 1 ]
+  [ "$stderr" = "Migrations failed, so nothing was switched. See $BATS_TEST_TMPDIR/build.log" ]
+  [ ! -e "$new" ]
+}
+
+@test "migrate: a passing migration keeps the release" {
+  local new=$BATS_TEST_TMPDIR/opt/$APP/releases/20260102T000000Z-bbbbbbb
+  mkdir -p "$new"
+  printf '%s\n' 'MIGRATE="echo \$SECRET"' >"$new/deploy.conf"
+  run migrate_then_switch "$new"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'== echo $SECRET\nx' ]
+  [ -d "$new" ]
 }

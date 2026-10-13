@@ -6,10 +6,11 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S3. `shipit setup` works, and `shipit deploy` deploys public or private
-> GitHub repos, zero-config Next.js apps or apps with a `deploy.conf`, and asks for `.env.example`
-> keys. No database, `MIGRATE`, `--ref` or rollback yet. Every other command except `help` says it
-> isn't implemented yet. See the milestones in plan §8.
+> **Status:** milestone S4. `shipit setup` works, and `shipit deploy` deploys public or private
+> GitHub repos, zero-config Next.js apps or apps with a `deploy.conf`, asks for `.env.example` keys,
+> creates a PostgreSQL database per app and runs `MIGRATE`. No `--ref`, rollback or backups yet (the
+> backup timer is enabled from S7). Every other command except `help` says it isn't implemented yet.
+> See the milestones in plan §8.
 
 ## Quick start
 
@@ -31,7 +32,8 @@ only when this session logged in with a key and the admin has one. It never over
 or `nftables.conf` it didn't write, and a re-run changes nothing.
 
 `deploy <url>` on a new repo asks for the domain (and an app name only if the one derived from the
-repo can't be used), picks the next free port from 3001, and writes `/etc/shipit/apps/<app>.conf`.
+repo can't be used), picks the next free port from 3001, asks whether to create a PostgreSQL database,
+and writes `/etc/shipit/apps/<app>.conf`.
 Then, on every deploy, it creates the app's user, folders, env file (`/etc/<app>/env`), systemd units
 and Caddy site; builds the branch as `deployer` (`npm ci`, `npm run build`, one build at a time);
 switches `/opt/<app>/current` atomically; restarts `<app>.target`; and checks `/` answers below 500.
@@ -61,6 +63,23 @@ example values are never used. For each key `/etc/<app>/env` doesn't have yet (e
 backslashes and leading or trailing spaces are refused. Keys are only ever added, so a key is asked
 once, and a key added in a later release is asked on that deploy. Without a terminal, deploy stops
 before building and says to add them with `sudo shipit env <app>`.
+
+**Database.** The database question defaults to yes when the default branch's `package.json` lists
+`pg`, `postgres`, `drizzle-orm`, `prisma` or `@prisma/client`; the answer is stored as `DATABASE=<app>`
+(or empty) in the app config. On every deploy of an app with a `DATABASE`, shipit makes sure the
+PostgreSQL role `<app>` exists (`LOGIN` only, with a random password made once), that the database is
+owned by it, and that only that role may connect to it (`REVOKE CONNECT … FROM PUBLIC`). The password
+is kept only in `/etc/<app>/env`, as
+`DATABASE_URL=postgresql://<app>:<password>@127.0.0.1:5432/<db>`, written once and never changed. It
+uses TCP on loopback (password auth) rather than the socket, because migrations run as `deployer`,
+which Debian's default peer auth would refuse; pg_hba.conf is left as Debian ships it. If the role
+already exists but the env file has no `DATABASE_URL`, deploy stops and says how to set a new
+password.
+
+**Migrations.** `MIGRATE` (from `deploy.conf`, or `npm run db:migrate` for a zero-config app whose
+`package.json` has that script) runs as `deployer` after the build and before the switch, with the env
+file's values. If it fails, deploy prints `Migrations failed, so nothing was switched. Still serving
+<release>.`, deletes the new release and exits 1; `current` is unchanged.
 
 ## Day to day
 
