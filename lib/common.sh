@@ -147,6 +147,14 @@ check_repo() {
   return 1
 }
 
+# --ref: a commit sha (4 to 64 lowercase hex characters). deploy then checks the branch contains it.
+check_ref() {
+  local LC_ALL=C
+  [[ $1 =~ ^[0-9a-f]{4,64}$ ]] && return 0
+  err "Invalid --ref '$1': give a commit sha from the app's branch, like 1a2b3c4."
+  return 1
+}
+
 # Env values are read literally by systemd and the build, so refuse anything they'd read differently.
 check_env_value() {
   local bad=$'\n\r"\'\\'

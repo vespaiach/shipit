@@ -91,6 +91,31 @@ add_line() {
   chown -R "$owner:" "$repo"
 }
 
+# remove_file <bare repo> <file>: commits the file's removal on main of the bare repo, keeping the repo's
+# owner. Prints the new commit's 7-character sha.
+remove_file() {
+  local repo=$1 file=$2 owner work
+  owner=$(stat -c %U "$repo")
+  work=$(mktemp -d)
+  git -c safe.directory='*' clone -q "$repo" "$work"
+  git -C "$work" rm -q "$file"
+  git -C "$work" -c user.name=e2e -c user.email=e2e@localhost commit -q -m "remove $file"
+  git -c safe.directory='*' -C "$work" push -q origin main
+  git -C "$work" rev-parse --short=7 HEAD
+  rm -rf "$work"
+  chown -R "$owner:" "$repo"
+}
+
+# deploy_ok <app or url> [args...]: deploys with no terminal, printing the output, and fails the scenario
+# if the deploy fails. Leaves the output in $out.
+deploy_ok() {
+  out=$(shipit deploy "$@" </dev/null 2>&1) || {
+    echo "$out"
+    fail "shipit deploy $* failed"
+  }
+  echo "$out"
+}
+
 # in_terminal <command>: runs the command in a pseudo-terminal, so deploy's hidden prompts are asked,
 # feeding it this function's stdin as typed answers. Exits with the command's status.
 in_terminal() {

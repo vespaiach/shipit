@@ -6,10 +6,11 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S4. `shipit setup` works, and `shipit deploy` deploys public or private
+> **Status:** milestone S5. `shipit setup` works, and `shipit deploy` deploys public or private
 > GitHub repos, zero-config Next.js apps or apps with a `deploy.conf`, asks for `.env.example` keys,
-> creates a PostgreSQL database per app and runs `MIGRATE`. No `--ref`, rollback or backups yet (the
-> backup timer is enabled from S7). Every other command except `help` says it isn't implemented yet.
+> creates a PostgreSQL database per app and runs `MIGRATE`. Redeploys (`--ref`, config changes,
+> `HEALTH_FAIL`) and `shipit rollback` work. No backups yet (the backup timer is enabled from S7).
+> Every other command except `help` says it isn't implemented yet.
 > See the milestones in plan §8.
 
 ## Quick start
@@ -76,6 +77,24 @@ which Debian's default peer auth would refuse; pg_hba.conf is left as Debian shi
 already exists but the env file has no `DATABASE_URL`, deploy stops and says how to set a new
 password.
 
+**Redeploys.** `sudo shipit deploy <app>`, or the repo URL again, redeploys the tip of the app's
+branch; `--ref <sha>` deploys an older commit instead, but only one the branch contains. A redeploy
+asks nothing and re-applies everything: edit `/etc/shipit/apps/<app>.conf` (`DOMAIN`, `PORT`,
+`LOG_REDACT_QUERY`, `HEALTH_FAIL`) and the next deploy rewrites the unit and site to match. Only files
+whose content changed are written, so a second deploy of the same sha changes nothing in `/etc`. A new
+`PORT` must be free and not another app's. `APP_URL` in the env file isn't changed with the domain;
+deploy says so, and `sudo shipit env <app>` changes it. The target is re-rendered from each release's
+processes, and instances the release no longer lists are stopped. One deploy or rollback per app runs
+at a time (`Another deploy or rollback of <app> is running.`), and builds of different apps take turns.
+
+**Health and rollback.** After the restart, deploy polls `HEALTH_PATH` (exactly `200`) or `/` (below
+`500`) for 60 seconds. If it stays unhealthy, `HEALTH_FAIL=report` (the default) exits 1 and says to
+run `sudo shipit rollback <app>`; `HEALTH_FAIL=rollback` switches back by itself and exits 1 with
+`Rolled back to <release>; the database keeps <sha>'s migrations.` `shipit rollback <app>` points
+`current` back at `previous`, removes `previous` (so a second rollback refuses), re-renders the target
+from that release's processes, restarts it and checks health. It never touches the database, so the
+previous release must work with the newer migrations.
+
 **Migrations.** `MIGRATE` (from `deploy.conf`, or `npm run db:migrate` for a zero-config app whose
 `package.json` has that script) runs as `deployer` after the build and before the switch, with the env
 file's values. If it fails, deploy prints `Migrations failed, so nothing was switched. Still serving
@@ -85,7 +104,7 @@ file's values. If it fails, deploy prints `Migrations failed, so nothing was swi
 
 | Command | What it does |
 |---|---|
-| `sudo shipit deploy <app>` | Redeploy the app's branch. A changed `/etc/shipit/apps/<app>.conf` takes effect here. |
+| `sudo shipit deploy <app> [--ref <sha>]` | Redeploy the app's branch, or one of its commits. A changed `/etc/shipit/apps/<app>.conf` takes effect here. |
 | `sudo shipit rollback <app>` | Switch back to the previous release. Never touches the database. |
 | `sudo shipit status [app]` | Releases, processes, health and backups |
 | `sudo shipit logs <app> [process \| access \| deploy]` | Follow the app's log files |

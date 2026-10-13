@@ -377,3 +377,21 @@ x"; do
   run check_database shared one
   [ "$status" -eq 0 ]
 }
+
+@test "ref: accepts commit shas, refuses anything else" {
+  local r
+  for r in abcd 1a2b3c4 0123456789abcdef0123456789abcdef01234567; do
+    run check_ref "$r"
+    [ "$status" -eq 0 ] || {
+      echo "refused $r"
+      return 1
+    }
+  done
+  for r in '' abc ABCDEF1 main 'HEAD~1' '1a2b3c4^' '-x' '1a2b 3c4' g123456 "$(printf 'a%.0s' {1..65})"; do
+    run check_ref "$r"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $r"
+      return 1
+    }
+  done
+}
