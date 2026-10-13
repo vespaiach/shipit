@@ -1,0 +1,12 @@
+# Replaces /etc/logrotate.d/postgresql-common: PostgreSQL writes its own log files,
+# rotated daily and kept 14 days (OPS-006).
+/var/log/postgresql/*.log {
+       daily
+       rotate 14
+       copytruncate
+       delaycompress
+       compress
+       notifempty
+       missingok
+       su root root
+}

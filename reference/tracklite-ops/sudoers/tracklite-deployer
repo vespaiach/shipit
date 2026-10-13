@@ -1,0 +1,5 @@
+# Installed as /etc/sudoers.d/tracklite-deployer (mode 440) by provision.sh.
+# The deployer account builds and switches releases as itself. These are the only
+# commands it may run as root, with exactly these arguments.
+deployer ALL=(root) NOPASSWD: /usr/bin/systemctl restart tracklite-web tracklite-worker
+deployer ALL=(root) NOPASSWD: /usr/bin/systemctl start tracklite-backup.service
