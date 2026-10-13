@@ -28,7 +28,7 @@ url=ssh://git@localhost/home/git/private-app.git
 grep -q '^localhost ' /etc/ssh/ssh_known_hosts || ssh-keyscan -t ed25519 localhost 2>/dev/null >>/etc/ssh/ssh_known_hosts
 
 log=$(mktemp)
-printf 'private-app.localhost\n' | shipit deploy "$url" >"$log" 2>&1 &
+printf 'private-app.localhost\n\n' | shipit deploy "$url" >"$log" 2>&1 &
 deploy_pid=$!
 key=''
 for _ in $(seq 60); do

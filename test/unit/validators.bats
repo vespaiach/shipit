@@ -347,3 +347,33 @@ x"; do
     }
   done
 }
+
+@test "database: accepts Postgres-safe names up to 63 characters" {
+  for name in a tracklite my_app2 "a$(printf 'b%.0s' {1..62})"; do
+    run check_database "$name"
+    [ "$status" -eq 0 ] || {
+      echo "refused $name"
+      return 1
+    }
+  done
+}
+
+@test "database: refuses names that need quoting or are too long" {
+  for name in '' 1db My_db my-db 'a b' 'db;drop' 'a"b' "a'b" "a$(printf 'b%.0s' {1..63})"; do
+    run check_database "$name"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $name"
+      return 1
+    }
+  done
+  [[ $output == *"Invalid DATABASE"* ]]
+}
+
+@test "database: unique across apps, except the app's own" {
+  write_app_conf one 'DATABASE=shared'
+  run check_database shared two
+  [ "$status" -eq 1 ]
+  [[ $output == *"already used by the app one"* ]]
+  run check_database shared one
+  [ "$status" -eq 0 ]
+}

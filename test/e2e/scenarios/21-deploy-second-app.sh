@@ -15,7 +15,7 @@ pid=$(systemctl show -p MainPID --value next_app@web.service)
 
 url=$(make_repo second-app test/fixtures/next-app)
 sha=$(short_sha second-app)
-out=$(printf 'second-app.localhost\n' | shipit deploy "$url" 2>&1) || {
+out=$(printf 'second-app.localhost\n\n' | shipit deploy "$url" 2>&1) || {
   echo "$out"
   fail "the second app's deploy failed"
 }

@@ -3,8 +3,8 @@
 # the release (C), then the release steps D1–D11. Sourcing this file only defines constants and
 # functions.
 #
-# Milestone seams, marked "S4:" and "S5:" below: the database and MIGRATE (S4), --ref and
-# HEALTH_FAIL=rollback (S5).
+# Milestone seams, marked "S5:" and "S7:" below: --ref and HEALTH_FAIL=rollback (S5), and the backup
+# timer (S7).
 
 CADDY_SITES=/etc/caddy/sites
 CADDYFILE=/etc/caddy/Caddyfile
@@ -16,6 +16,10 @@ BUILD_LOGS_KEEP=10
 HEALTH_TIMEOUT=60
 # How often a private repo's ls-remote is retried while waiting for its deploy key to be added.
 KEY_RETRY_SECONDS=5
+# Where DATABASE_URL points: the shared cluster over TCP on loopback, with the role's password. TCP
+# rather than the socket because migrations run as deployer, which peer auth would refuse.
+PG_HOST=127.0.0.1
+PG_PORT=5432
 
 # Run as deployer by deploy_commands when the release has a deploy.conf: sources it the way the build
 # will, and checks it sets what deploy needs. Root never sources repo content.
@@ -29,10 +33,6 @@ missing=""
 [ -n "$(compgen -v PROCESS_)" ] || missing="$missing PROCESS_<name>"
 if [ -n "$missing" ]; then
   echo "deploy.conf must set$missing." >&2
-  exit 1
-fi
-if [ -n "${MIGRATE-}" ]; then
-  echo "deploy.conf sets MIGRATE, but shipit does not run migrations yet. Remove it for now." >&2
   exit 1
 fi'
 
@@ -53,6 +53,21 @@ bash -c "$INSTALL"
 printf "== %s\n" "$BUILD"
 bash -c "$BUILD"'
 
+# Run as deployer by deploy_migrate, like BUILD_SCRIPT: MIGRATE from deploy.conf if the release has one,
+# or else the zero-config default root passes as $2 (empty when there's nothing to run).
+# shellcheck disable=SC2016 # expanded by the deployer's bash, not here
+MIGRATE_SCRIPT='set -euo pipefail
+umask 022
+while IFS= read -r line; do export "$line"; done
+exec </dev/null
+cd "$1"
+export PATH="$PWD/node_modules/.bin:$PATH"
+MIGRATE=$2
+if [ -f deploy.conf ]; then . ./deploy.conf; fi
+[ -n "${MIGRATE-}" ] || exit 0
+printf "== %s\n" "$MIGRATE"
+bash -c "$MIGRATE"'
+
 # This deploy's state. The app config's values (REPO BRANCH DOMAIN PORT DATABASE HEALTH_FAIL
 # LOG_REDACT_QUERY) are globals too, set by deploy_load_conf or the new-app questions.
 APP=''
@@ -66,6 +81,7 @@ RELEASE=''
 SWITCHED=''
 PROCESSES=()
 HEALTH_PATH=''
+MIGRATE=''
 GIT_ENV=(GIT_TERMINAL_PROMPT=0)
 
 # ---- Small parsers and checks (unit-tested) ------------------------------------------------------
@@ -186,6 +202,69 @@ zero_config_check() {
   fi
 }
 
+# package_wants_database <package.json>: package.json lists a PostgreSQL client or ORM in dependencies
+# or devDependencies. Read as data with jq; a missing or broken file means no.
+package_wants_database() {
+  jq -e '(.dependencies // {}) + (.devDependencies // {})
+    | has("pg") or has("postgres") or has("drizzle-orm") or has("prisma") or has("@prisma/client")' \
+    "$1" >/dev/null 2>&1 || return 1
+}
+
+# package_has_script <package.json> <name>: package.json's scripts has <name>.
+package_has_script() {
+  jq -e --arg s "$2" '.scripts[$s] | type == "string"' "$1" >/dev/null 2>&1 || return 1
+}
+
+# ---- SQL (run as postgres by pg_psql; names are validated first, and quoted all the same) ---------
+
+# sql_ident <name> and sql_literal <text>: a quoted identifier and a quoted string literal.
+sql_ident() {
+  local q='"'
+  printf '"%s"' "${1//$q/$q$q}"
+}
+
+sql_literal() {
+  local q="'"
+  printf "'%s'" "${1//$q/$q$q}"
+}
+
+# sql_role_exists <role>: prints 1 when the role exists.
+sql_role_exists() {
+  printf 'SELECT 1 FROM pg_roles WHERE rolname = %s;\n' "$(sql_literal "$1")"
+}
+
+# sql_database_owner <db>: prints the database's owner, if it exists.
+sql_database_owner() {
+  printf 'SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = %s;\n' "$(sql_literal "$1")"
+}
+
+# sql_create_role <role> <password>: sent on stdin, so the password is never on a command line.
+sql_create_role() {
+  printf 'CREATE ROLE %s LOGIN PASSWORD %s;\n' "$(sql_ident "$1")" "$(sql_literal "$2")"
+}
+
+# sql_database <role> <db>: the database owned by the role, if it's missing (CREATE DATABASE can't run
+# in a DO block, so psql's \gexec runs it), then only that role may connect to it.
+sql_database() {
+  local role db
+  role=$(sql_ident "$1")
+  db=$(sql_ident "$2")
+  printf 'SELECT %s WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = %s)\\gexec\n' \
+    "$(sql_literal "CREATE DATABASE $db OWNER $role")" "$(sql_literal "$2")"
+  printf 'REVOKE CONNECT ON DATABASE %s FROM PUBLIC;\n' "$db"
+  printf 'GRANT CONNECT ON DATABASE %s TO %s;\n' "$db" "$role"
+}
+
+# database_url <role> <password> <db>
+database_url() {
+  printf 'postgresql://%s:%s@%s:%s/%s\n' "$1" "$2" "$PG_HOST" "$PG_PORT" "$3"
+}
+
+# db_password: 48 random hex characters, so it needs no escaping in a URL, SQL or the env file.
+db_password() {
+  od -An -tx1 -N24 /dev/urandom | tr -d ' \n'
+}
+
 # conf_processes: reads deploy.conf on stdin and prints its process names, one per line, in order and
 # without repeats. Root never sources deploy.conf, so only lines that start with PROCESS_<name>= count:
 # indented, commented, `export`ed or computed names ($(...)) are ignored, and the value is never read.
@@ -292,7 +371,7 @@ prune_build_logs() {
 
 app_conf_text() {
   printf '%s\n' "# Written by the first \`shipit deploy\` of $APP. Edit it, then run \`sudo shipit deploy $APP\` to apply it. No secrets."
-  printf 'REPO=%q\nBRANCH=%q\nDOMAIN=%q\nPORT=%q\n' "$REPO" "$BRANCH" "$DOMAIN" "$PORT"
+  printf 'REPO=%q\nBRANCH=%q\nDOMAIN=%q\nPORT=%q\nDATABASE=%q\n' "$REPO" "$BRANCH" "$DOMAIN" "$PORT" "$DATABASE"
   printf '%s\n' 'HEALTH_FAIL=report'
 }
 
@@ -373,6 +452,24 @@ repo_ls_remote() {
   as_deployer "${GIT_ENV[@]}" git ls-remote --symref "$REPO" HEAD >"$DEPLOY_TMP/head" 2>/dev/null </dev/null
 }
 
+# repo_package_json: prints package.json from the tip of BRANCH, fetched by deployer into a throwaway
+# bare repo (a new app has no repo of its own yet). Root only reads the output, with jq.
+repo_package_json() {
+  # shellcheck disable=SC2016 # expanded by the deployer's bash
+  as_deployer "${GIT_ENV[@]}" bash -c '
+    set -euo pipefail
+    d=$(mktemp -d)
+    trap "rm -rf -- $d" EXIT
+    git init --quiet --bare "$d"
+    git -C "$d" fetch --quiet --depth 1 --no-tags "$1" "refs/heads/$2"
+    git -C "$d" show FETCH_HEAD:package.json' package "$REPO" "$BRANCH" </dev/null 2>/dev/null
+}
+
+# pg_psql: runs the SQL on stdin as postgres, printing bare query results.
+pg_psql() {
+  (cd / && runuser -u postgres -- psql -X -q -t -A -v ON_ERROR_STOP=1 -d postgres)
+}
+
 # Appends one line to deploy.log for every deploy that got the app lock, deletes a release that was
 # never switched to, and removes the temp folder.
 deploy_exit() {
@@ -429,17 +526,40 @@ deploy_new_app() {
     log "Point an A record for $DOMAIN at $ip. Caddy will get the certificate once it does."
   fi
   PORT=$(allocate_port) || exit 1
-  # S4: ask "Create a PostgreSQL database? [Y/n]" here, defaulting from package.json.
 
   # A private repo's default branch can only be read once its deploy key works.
   if repo_uses_key "$REPO"; then deploy_repo_access; fi
   BRANCH=$(default_branch <"$DEPLOY_TMP/head") || die "Couldn't find the default branch of $url."
   check_branch "$BRANCH" || exit 1
+  ask_database
 
   conf=$SHIPIT_ETC/apps/$APP.conf
   app_conf_text >"$DEPLOY_TMP/app.conf"
   install -m 644 "$DEPLOY_TMP/app.conf" "$conf"
   log "Wrote $conf (port $PORT, branch $BRANCH)."
+}
+
+# ask_database: sets DATABASE to the app's name, or to nothing. The default is yes when the branch's
+# package.json lists a PostgreSQL client or ORM.
+ask_database() {
+  local default=n prompt='[y/N]' answer
+  if repo_package_json >"$DEPLOY_TMP/package.json" && package_wants_database "$DEPLOY_TMP/package.json"; then
+    default=y
+    prompt='[Y/n]'
+  fi
+  while :; do
+    ask "Create a PostgreSQL database? $prompt " answer || need_answer
+    case ${answer:-$default} in
+      [Yy] | [Yy][Ee][Ss])
+        DATABASE=$APP
+        return 0
+        ;;
+      [Nn] | [Nn][Oo])
+        DATABASE=''
+        return 0
+        ;;
+    esac
+  done
 }
 
 # ---- B. Guards -----------------------------------------------------------------------------------
@@ -465,9 +585,8 @@ deploy_load_conf() {
       ;;
   esac
   [ -z "$LOG_REDACT_QUERY" ] || check_redact_query "$LOG_REDACT_QUERY" || ok=''
+  [ -z "$DATABASE" ] || check_database "$DATABASE" "$APP" || ok=''
   [ -n "$ok" ] || die "Fix $conf, then re-run sudo shipit deploy $APP."
-  # S4: create and use the database.
-  [ -z "$DATABASE" ] || die "$conf sets DATABASE, but shipit doesn't create databases yet. Remove the line for now."
 }
 
 deploy_guards() {
@@ -503,7 +622,6 @@ deploy_folders() {
   install -d -m 750 -o root -g adm "$logs/builds"
   ensure_file "$logs/access.log" caddy:adm 640
   install -d -m 700 "/etc/$APP"
-  # S4: the database is created here.
 }
 
 # Repo access (C): private repos only. Creates deployer's ed25519 key for the app if it's missing.
@@ -529,6 +647,39 @@ deploy_repo_access() {
   log "Waiting for the repo to accept it (checking every $KEY_RETRY_SECONDS seconds; Ctrl-C stops, and the next deploy picks up from here)…"
   until repo_ls_remote; do sleep "$KEY_RETRY_SECONDS"; done
   log "The deploy key works."
+}
+
+# Database (C): only when DATABASE is set. The role is the app's name, with a random password made
+# once and kept only in DATABASE_URL in the env file, which is written right after the role is created
+# (so a later failing step can't lose it). Then the database, owned by the role, and only that role may
+# connect to it. Everything runs as postgres.
+deploy_database() {
+  local env=/etc/$APP/env exists owner has_url='' password
+  [ -n "$DATABASE" ] || return 0
+  exists=$(sql_role_exists "$APP" | pg_psql) || die "Couldn't query PostgreSQL. Check: systemctl status postgresql"
+  if [ -f "$env" ] && grep -q '^DATABASE_URL=' -- "$env"; then has_url=1; fi
+  if [ -n "$exists" ] && [ -z "$has_url" ]; then
+    die "The PostgreSQL role $APP already exists, but $env has no DATABASE_URL, so its password can't be recovered." \
+      "Set a new one: run sudo -u postgres psql, then ALTER ROLE $(sql_ident "$APP") PASSWORD '<new password>';" \
+      "Then add DATABASE_URL=$(database_url "$APP" '<new password>' "$DATABASE") to $env and re-run the deploy."
+  fi
+  if [ -z "$exists" ] && [ -n "$has_url" ]; then
+    die "$env has a DATABASE_URL, but there's no PostgreSQL role $APP. Remove the DATABASE_URL line from $env and re-run the deploy; it creates the role with a new password."
+  fi
+  owner=$(sql_database_owner "$DATABASE" | pg_psql) || die "Couldn't query PostgreSQL. Check: systemctl status postgresql"
+  if [ -n "$owner" ] && [ "$owner" != "$APP" ]; then
+    die "A PostgreSQL database named $DATABASE already exists and belongs to $owner, not $APP. Set another DATABASE in $SHIPIT_ETC/apps/$APP.conf, then re-run the deploy."
+  fi
+
+  if [ -z "$exists" ]; then
+    password=$(db_password)
+    [[ $password =~ ^[0-9a-f]{48}$ ]] || die "Couldn't make a random password."
+    sql_create_role "$APP" "$password" | pg_psql >/dev/null || die "Creating the PostgreSQL role $APP failed."
+    env_add_missing "$env" "DATABASE_URL=$(database_url "$APP" "$password" "$DATABASE")" >"$DEPLOY_TMP/env"
+    install -m 600 "$DEPLOY_TMP/env" "$env"
+    log "Created the PostgreSQL role $APP, and added its DATABASE_URL to $env."
+  fi
+  sql_database "$APP" "$DATABASE" | pg_psql >/dev/null || die "Creating the PostgreSQL database $DATABASE failed."
 }
 
 # ---- D. The release ------------------------------------------------------------------------------
@@ -558,10 +709,12 @@ deploy_fetch() {
 }
 
 # D3: the commands. A release with deploy.conf uses it: deployer sources it to check it, and root reads
-# only the process names and HEALTH_PATH from a copy, as data. Otherwise the zero-config defaults.
+# only the process names and HEALTH_PATH from a copy, as data (its MIGRATE is read by deployer, in
+# MIGRATE_SCRIPT). Otherwise the zero-config defaults, with MIGRATE only if package.json has db:migrate.
 deploy_commands() {
   local conf=$DEPLOY_TMP/deploy.conf out p
   HEALTH_PATH=''
+  MIGRATE=''
   if release_has deploy.conf; then
     release_cat deploy.conf >"$conf" || die "Reading the release's deploy.conf failed."
     out=$(as_deployer PORT="$PORT" bash -c "$CONF_CHECK_SCRIPT" check "$RELEASE" 2>&1 </dev/null) || die "$out"
@@ -570,6 +723,8 @@ deploy_commands() {
   else
     zero_config_check "$RELEASE" || exit 1
     PROCESSES=(web)
+    release_cat package.json >"$DEPLOY_TMP/package.json" || die "Reading the release's package.json failed."
+    if package_has_script "$DEPLOY_TMP/package.json" db:migrate; then MIGRATE="npm run db:migrate"; fi
   fi
   for p in "${PROCESSES[@]}"; do check_process_name "$p" || exit 1; done
   [ "${#PROCESSES[@]}" -gt 0 ] \
@@ -577,7 +732,8 @@ deploy_commands() {
 }
 
 # D4: the env file. It only ever gains keys: APP_URL, then a value for each key of the release's
-# .env.example it doesn't have yet, asked with hidden input. S4: add DATABASE_URL.
+# .env.example it doesn't have yet, asked with hidden input. DATABASE_URL is already there for an app
+# with a database: deploy_database wrote it.
 deploy_env() {
   local file=/etc/$APP/env lines=("APP_URL=https://$DOMAIN") missing=() key value
   env_add_missing "$file" "${lines[@]}" >"$DEPLOY_TMP/env"
@@ -615,7 +771,19 @@ deploy_build() {
   fi
   lock_release
   LOCK_FD=$app_fd
-  # S4: D6, MIGRATE, runs here.
+}
+
+# D6: MIGRATE, if there is one, as deployer with the env file on stdin like the build. On failure the
+# release is deleted (deploy_exit) and current stays as it was.
+deploy_migrate() {
+  local old
+  if env_file_lines "/etc/$APP/env" \
+    | as_deployer PORT="$PORT" bash -c "$MIGRATE_SCRIPT" migrate "$RELEASE" "$MIGRATE" 2>&1 | tee -a "$BUILD_LOG"; then
+    return 0
+  fi
+  old=$(readlink "$SHIPIT_OPT/$APP/current") || old=''
+  [ -z "$old" ] || die "Migrations failed, so nothing was switched. Still serving ${old##*/}. See $BUILD_LOG"
+  die "Migrations failed, so nothing was switched. See $BUILD_LOG"
 }
 
 # D7: units and site, validated on temp copies, installed only when changed.
@@ -663,7 +831,8 @@ deploy_units_and_site() {
       log "Caddy wasn't reloaded, because $CADDYFILE isn't shipit's yet. Switch to $CADDYFILE.shipit (sudo shipit setup says how) to serve $DOMAIN."
     fi
   fi
-  # S4: enable shipit-backup@<app>.timer when DATABASE is set.
+  # S7: enable shipit-backup@<app>.timer when DATABASE is set. Not before: until libexec/backup exists
+  # the timer's service would fail every night.
 }
 
 # D8: point current, then previous, at their releases, each atomically.
@@ -738,6 +907,7 @@ cmd_deploy() {
   deploy_user
   deploy_folders
   deploy_repo_access
+  deploy_database
   BUILD_LOG=$LOG_ROOT/$APP/builds/deploy-$DEPLOY_UTC.log
   ensure_file "$BUILD_LOG" root:adm 640
   prune_build_logs "$LOG_ROOT/$APP/builds" "$BUILD_LOGS_KEEP"
@@ -746,6 +916,7 @@ cmd_deploy() {
   deploy_commands
   deploy_env
   deploy_build
+  deploy_migrate
   log "== Installing units and site"
   deploy_units_and_site
   log "== Switching to $DEPLOY_SHA"

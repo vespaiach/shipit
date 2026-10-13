@@ -113,6 +113,21 @@ unit_sets_port() {
   systemctl cat -- "$1@.service" 2>/dev/null | grep -Eq "^Environment=(.* )?PORT=$2( |\$)"
 }
 
+# check_database <name> [app]: a PostgreSQL database name (at most 63 bytes, like any Postgres name),
+# unique across every app config except <app>'s own.
+check_database() {
+  local LC_ALL=C other
+  if ! [[ $1 =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
+    err "Invalid DATABASE '$1': use a lowercase letter, then up to 62 lowercase letters, digits or _."
+    return 1
+  fi
+  other=$(app_using DATABASE "$1" "${2-}") || return 1
+  if [ -n "$other" ]; then
+    err "The database $1 is already used by the app $other."
+    return 1
+  fi
+}
+
 # A git branch name as `git ls-remote --symref` reports it, or as written in an app config.
 check_branch() {
   local LC_ALL=C
