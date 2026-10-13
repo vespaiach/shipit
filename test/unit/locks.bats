@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2016,SC2034 # stub bodies are single-quoted on purpose; tests set lib variables
+# shellcheck disable=SC2016,SC2034,SC2153 # stub bodies are single-quoted on purpose; tests set and read lib variables
 # Lock helpers: they take the lock file's path, so tests use a temp file.
 
 bats_require_minimum_version 1.5.0
@@ -67,4 +67,21 @@ teardown() {
 @test "the lock is released when the holder exits" {
   (lock_try "$lock")
   flock -n "$lock" true
+}
+
+@test "lock_close_all stops a leftover child process holding the locks" {
+  local other=$BATS_TEST_TMPDIR/build.lock
+  lock_try "$lock"
+  local app_fd=$LOCK_FD
+  lock_wait "$other"
+  [ "${#LOCK_FDS[@]}" -eq 2 ]
+  (lock_close_all && exec sleep 30) &
+  local child=$!
+  lock_release
+  LOCK_FD=$app_fd
+  lock_release
+  [ "${#LOCK_FDS[@]}" -eq 0 ]
+  flock -n "$lock" true
+  flock -n "$other" true
+  kill "$child"
 }

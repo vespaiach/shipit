@@ -379,15 +379,25 @@ BLANK=' ]
 
 # ---- Command line --------------------------------------------------------------------------------
 
-@test "deploy: usage, and --ref isn't implemented yet" {
+@test "deploy: usage, and --ref must be a sha" {
+  local usage="Usage: sudo shipit deploy <github-url | app> [--ref <sha>]"
   run --separate-stderr cmd_deploy
   [ "$status" -eq 1 ]
-  [[ $stderr == "Usage: sudo shipit deploy <github-url | app>" ]]
+  [ "$stderr" = "$usage" ]
   run --separate-stderr cmd_deploy a b
   [ "$status" -eq 1 ]
+  [ "$stderr" = "$usage" ]
+  run --separate-stderr cmd_deploy myapp --ref
+  [ "$stderr" = "$usage" ]
+  run --separate-stderr cmd_deploy myapp --other abc123
+  [ "$stderr" = "$usage" ]
+  run --separate-stderr cmd_deploy myapp --ref 'HEAD~1'
+  [ "$status" -eq 1 ]
+  [[ $stderr == "Invalid --ref 'HEAD~1'"* ]]
+  # A valid sha gets as far as the next check.
   run --separate-stderr cmd_deploy myapp --ref abc123
   [ "$status" -eq 1 ]
-  [[ $stderr == *"--ref isn't implemented yet"* ]]
+  [[ $stderr == *"sudo shipit setup"* ]]
 }
 
 @test "deploy: refuses before setup has run" {

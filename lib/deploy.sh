@@ -3,8 +3,8 @@
 # the release (C), then the release steps D1–D11. Sourcing this file only defines constants and
 # functions.
 #
-# Milestone seams, marked "S5:" and "S7:" below: --ref and HEALTH_FAIL=rollback (S5), and the backup
-# timer (S7).
+# The rollback steps (switch_back) live here too, because HEALTH_FAIL=rollback runs them from D11;
+# lib/rollback.sh sources this file. Milestone seam, marked "S7:" below: the backup timer.
 
 CADDY_SITES=/etc/caddy/sites
 CADDYFILE=/etc/caddy/Caddyfile
@@ -20,6 +20,22 @@ KEY_RETRY_SECONDS=5
 # rather than the socket because migrations run as deployer, which peer auth would refuse.
 PG_HOST=127.0.0.1
 PG_PORT=5432
+
+# Run as deployer by deploy_fetch: fetches BRANCH into the bare repo $1 from $2, then prints the commit
+# to deploy: the branch's tip, or the --ref $4 when it's a commit reachable from that tip. Exits 3 when
+# the ref isn't one.
+# shellcheck disable=SC2016 # expanded by the deployer's bash, not here
+FETCH_SCRIPT='set -euo pipefail
+[ -f "$1/HEAD" ] || git init --quiet --bare "$1"
+git -C "$1" fetch --quiet --no-tags "$2" "refs/heads/$3"
+tip=$(git -C "$1" rev-parse --verify "FETCH_HEAD^{commit}")
+if [ -z "$4" ]; then
+  printf "%s\n" "$tip"
+  exit 0
+fi
+sha=$(git -C "$1" rev-parse --verify --quiet "$4^{commit}") || exit 3
+git -C "$1" merge-base --is-ancestor "$sha" "$tip" || exit 3
+printf "%s\n" "$sha"'
 
 # Run as deployer by deploy_commands when the release has a deploy.conf: sources it the way the build
 # will, and checks it sets what deploy needs. Root never sources repo content.
@@ -81,7 +97,9 @@ RELEASE=''
 SWITCHED=''
 PROCESSES=()
 HEALTH_PATH=''
+HEALTH_CODE=''
 MIGRATE=''
+REF=''
 GIT_ENV=(GIT_TERMINAL_PROMPT=0)
 
 # ---- Small parsers and checks (unit-tested) ------------------------------------------------------
@@ -290,6 +308,16 @@ conf_health_path() {
   printf '%s\n' "$value"
 }
 
+# stale_instances <app> <process>...: reads `systemctl list-units` lines on stdin and prints the
+# app's instance units whose process isn't one of those given, one per line.
+stale_instances() {
+  local app=$1
+  shift
+  LC_ALL=C awk -v app="$app" -v keep=" $* " '
+    { u = $1; p = substr(u, length(app) + 2, length(u) - length(app) - 9) }
+    index(u, app "@") == 1 && u ~ /\.service$/ && index(keep, " " p " ") == 0 { print u }'
+}
+
 # env_example_keys: reads .env.example on stdin and prints its key names, one per line, in order and
 # without repeats. Only lines that start with KEY= (uppercase letters, digits and _) count: comments,
 # indented and `export` lines are ignored, and the example values are never used.
@@ -406,7 +434,7 @@ render_site() {
 as_deployer() {
   local home
   home=$(user_home "$DEPLOY_USER")
-  (cd / && runuser -u "$DEPLOY_USER" -- env -i HOME="$home" PATH="$SYSTEM_PATH" LANG=C.UTF-8 "$@")
+  (lock_close_all && cd / && runuser -u "$DEPLOY_USER" -- env -i HOME="$home" PATH="$SYSTEM_PATH" LANG=C.UTF-8 "$@")
 }
 
 # release_has <file> and release_cat <file>: read a file in the release as deployer, so a symlink in
@@ -684,18 +712,15 @@ deploy_database() {
 
 # ---- D. The release ------------------------------------------------------------------------------
 
-# D1–D2: fetch BRANCH into the bare repo and extract it into releases/<UTC>-<sha>, both as deployer.
+# D1–D2: fetch BRANCH into the bare repo, resolve --ref (REF) or the branch's tip, and extract it into
+# releases/<UTC>-<sha>, all as deployer.
 deploy_fetch() {
-  local repo=$SHIPIT_OPT/$APP/repo sha release
+  local repo=$SHIPIT_OPT/$APP/repo sha release status=0
   log "== Fetching $BRANCH from $REPO"
-  # shellcheck disable=SC2016 # expanded by the deployer's bash
-  sha=$(as_deployer "${GIT_ENV[@]}" bash -c '
-    set -euo pipefail
-    [ -f "$1/HEAD" ] || git init --quiet --bare "$1"
-    git -C "$1" fetch --quiet --no-tags "$2" "refs/heads/$3"
-    git -C "$1" rev-parse --verify "FETCH_HEAD^{commit}"' fetch "$repo" "$REPO" "$BRANCH" 2>>"$BUILD_LOG") \
-    || die "Fetching $BRANCH from $REPO failed. See $BUILD_LOG"
-  # S5: resolve --ref here and check it's reachable from the branch.
+  sha=$(as_deployer "${GIT_ENV[@]}" bash -c "$FETCH_SCRIPT" fetch "$repo" "$REPO" "$BRANCH" "$REF" \
+    2>>"$BUILD_LOG" </dev/null) || status=$?
+  [ "$status" -ne 3 ] || die "$REF isn't a commit on $BRANCH, so it can't be deployed. Only commits the branch contains ship."
+  [ "$status" -eq 0 ] || die "Fetching $BRANCH from $REPO failed. See $BUILD_LOG"
   [[ $sha =~ ^[0-9a-f]{40,64}$ ]] || die "git returned an unexpected commit id: $sha"
   DEPLOY_SHA=${sha:0:7}
 
@@ -709,22 +734,32 @@ deploy_fetch() {
 }
 
 # D3: the commands. A release with deploy.conf uses it: deployer sources it to check it, and root reads
-# only the process names and HEALTH_PATH from a copy, as data (its MIGRATE is read by deployer, in
-# MIGRATE_SCRIPT). Otherwise the zero-config defaults, with MIGRATE only if package.json has db:migrate.
+# only the process names and HEALTH_PATH, as data (release_processes; its MIGRATE is read by deployer,
+# in MIGRATE_SCRIPT). Otherwise the zero-config defaults, with MIGRATE only if package.json has
+# db:migrate.
 deploy_commands() {
-  local conf=$DEPLOY_TMP/deploy.conf out p
-  HEALTH_PATH=''
+  local out
   MIGRATE=''
   if release_has deploy.conf; then
-    release_cat deploy.conf >"$conf" || die "Reading the release's deploy.conf failed."
     out=$(as_deployer PORT="$PORT" bash -c "$CONF_CHECK_SCRIPT" check "$RELEASE" 2>&1 </dev/null) || die "$out"
-    mapfile -t PROCESSES < <(conf_processes <"$conf")
-    HEALTH_PATH=$(conf_health_path <"$conf") || exit 1
   else
     zero_config_check "$RELEASE" || exit 1
-    PROCESSES=(web)
     release_cat package.json >"$DEPLOY_TMP/package.json" || die "Reading the release's package.json failed."
     if package_has_script "$DEPLOY_TMP/package.json" db:migrate; then MIGRATE="npm run db:migrate"; fi
+  fi
+  release_processes
+}
+
+# release_processes: sets PROCESSES and HEALTH_PATH for RELEASE. From a copy of its deploy.conf, read as
+# data (conf_processes, conf_health_path), or the zero-config web process and lenient health check.
+release_processes() {
+  local conf=$DEPLOY_TMP/deploy.conf p
+  HEALTH_PATH=''
+  PROCESSES=(web)
+  if release_has deploy.conf; then
+    release_cat deploy.conf >"$conf" || die "Reading the release's deploy.conf failed."
+    mapfile -t PROCESSES < <(conf_processes <"$conf")
+    HEALTH_PATH=$(conf_health_path <"$conf") || exit 1
   fi
   for p in "${PROCESSES[@]}"; do check_process_name "$p" || exit 1; done
   [ "${#PROCESSES[@]}" -gt 0 ] \
@@ -740,6 +775,10 @@ deploy_env() {
   if install_if_changed "$DEPLOY_TMP/env" "$file" 600; then log "Wrote $file."; fi
   chown root:root "$file"
   env_file_lines "$file" >/dev/null || die "Fix it with: sudo shipit env $APP"
+  # APP_URL is only ever added, so a changed DOMAIN doesn't change it.
+  if ! grep -qxF "APP_URL=https://$DOMAIN" -- "$file" && grep -q '^APP_URL=' -- "$file"; then
+    log "$file sets an APP_URL other than https://$DOMAIN. If the domain changed, update it with: sudo shipit env $APP"
+  fi
 
   release_has .env.example || return 0
   release_cat .env.example >"$DEPLOY_TMP/env.example" || die "Reading the release's .env.example failed."
@@ -765,10 +804,12 @@ deploy_build() {
   local app_fd=$LOCK_FD
   lock_wait "$SHIPIT_VAR/build.lock" "Waiting for another app's build…" || die "Couldn't take the build lock."
   log "== Building $DEPLOY_SHA (output in $BUILD_LOG)"
+  printf '== Build lock taken at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$BUILD_LOG"
   if ! env_file_lines "/etc/$APP/env" \
     | as_deployer PORT="$PORT" bash -c "$BUILD_SCRIPT" build "$RELEASE" 2>&1 | tee -a "$BUILD_LOG"; then
     die "The build failed, so nothing was switched. See $BUILD_LOG"
   fi
+  printf '== Build lock released at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$BUILD_LOG"
   lock_release
   LOCK_FD=$app_fd
 }
@@ -849,8 +890,16 @@ deploy_switch() {
   fi
 }
 
-# D9: PartOf= passes the restart on to every process.
+# D9: stops the app's instances the release doesn't list (the launcher would exit 78 for them), then
+# restarts <app>.target. PartOf= passes the restart on to every listed process.
 deploy_restart() {
+  local stale=() unit
+  mapfile -t stale < <(systemctl list-units --all --plain --no-legend --type=service "$APP@*.service" \
+    | stale_instances "$APP" "${PROCESSES[@]}")
+  for unit in "${stale[@]}"; do
+    systemctl stop "$unit" || die "Stopping $unit failed."
+    log "Stopped $unit: this release doesn't run it."
+  done
   systemctl restart "$APP.target" || die "Restarting $APP.target failed. Check: systemctl status '$APP@*'"
 }
 
@@ -868,31 +917,92 @@ health_code() {
   curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $DOMAIN" "http://127.0.0.1:$PORT$1" || true
 }
 
-# D11: poll for up to HEALTH_TIMEOUT seconds. HEALTH_PATH (from deploy.conf) makes it strict.
-deploy_health() {
-  local path=${HEALTH_PATH:-/} strict=${HEALTH_PATH:+1} code deadline=$((SECONDS + HEALTH_TIMEOUT))
+# health_wait: polls for up to HEALTH_TIMEOUT seconds, leaving the last status in HEALTH_CODE.
+# HEALTH_PATH (from deploy.conf) makes it strict.
+health_wait() {
+  local path=${HEALTH_PATH:-/} strict=${HEALTH_PATH:+1} deadline=$((SECONDS + HEALTH_TIMEOUT))
   log "== Checking http://127.0.0.1:$PORT$path"
   while :; do
-    code=$(health_code "$path")
-    if health_ok "$code" "$strict"; then
-      DEPLOY_RESULT=deployed
-      log "Deployed $DEPLOY_SHA. https://$DOMAIN"
-      return 0
-    fi
-    [ "$SECONDS" -lt "$deadline" ] || break
+    HEALTH_CODE=$(health_code "$path")
+    health_ok "$HEALTH_CODE" "$strict" && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 2
   done
+}
+
+# D11: the health check. When it fails, HEALTH_FAIL=rollback switches back to previous (the app lock
+# is already held); report, the default, says how to.
+deploy_health() {
+  local old report
+  if health_wait; then
+    DEPLOY_RESULT=deployed
+    log "Deployed $DEPLOY_SHA. https://$DOMAIN"
+    return 0
+  fi
   DEPLOY_RESULT=unhealthy
-  # S5: with HEALTH_FAIL=rollback, run the rollback steps here (the lock is already held).
-  die "Deployed $DEPLOY_SHA, but $path answered $code. Switch back with: sudo shipit rollback $APP"
+  report="Deployed $DEPLOY_SHA, but ${HEALTH_PATH:-/} answered $HEALTH_CODE."
+  if [ "$HEALTH_FAIL" = rollback ]; then
+    if old=$(previous_release); then
+      err "$report Rolling back to ${old##*/}, because HEALTH_FAIL=rollback."
+      switch_back "$old"
+      DEPLOY_RESULT=rolled-back
+      health_wait || err "${old##*/} isn't healthy either: ${HEALTH_PATH:-/} answered $HEALTH_CODE."
+      die "Rolled back to ${old##*/}; the database keeps $DEPLOY_SHA's migrations."
+    fi
+    err "There's no previous release to roll back to."
+  fi
+  die "$report Switch back with: sudo shipit rollback $APP"
+}
+
+# ---- Rollback (plan §3), also run by D11 with HEALTH_FAIL=rollback --------------------------------
+
+# previous_release: prints the release previous points at, failing when there's none.
+previous_release() {
+  local p
+  p=$(readlink "$SHIPIT_OPT/$APP/previous") && [ -d "$p" ] && printf '%s\n' "$p"
+}
+
+# switch_links <release>: points current at the release atomically, then removes previous.
+switch_links() {
+  local opt=$SHIPIT_OPT/$APP
+  rm -f -- "$opt/current.new"
+  { ln -s "$1" "$opt/current.new" && mv -T "$opt/current.new" "$opt/current"; } \
+    || die "Switching $opt/current failed."
+  rm -f -- "$opt/previous"
+}
+
+# switch_back <release>: rollback steps 1–3, with the app lock held. Re-renders <app>.target from the
+# release's process names (read as data), switches current to it and removes previous, then restarts
+# the target, which stops the instances that release doesn't list. Sets PROCESSES and HEALTH_PATH for
+# it. Never touches the database: the launcher reads current/deploy.conf, so its commands come back.
+switch_back() {
+  local RELEASE=$1 t=$DEPLOY_TMP/rollback out
+  release_processes
+  mkdir -p "$t"
+  render_target "${PROCESSES[@]}" >"$t/$APP.target" || exit 1
+  cp -- "$SYSTEMD_DIR/$APP@.service" "$t/" || die "$SYSTEMD_DIR/$APP@.service is missing. Run: sudo shipit deploy $APP"
+  out=$(systemd-analyze verify "$t/$APP@.service" "$t/$APP.target" 2>&1) \
+    || die "$out"$'\n'"$APP.target didn't pass systemd-analyze verify, so nothing was changed."
+  if install_if_changed "$t/$APP.target" "$SYSTEMD_DIR/$APP.target" 644; then
+    log "Wrote $SYSTEMD_DIR/$APP.target."
+    systemctl daemon-reload || die "systemctl daemon-reload failed."
+  fi
+  switch_links "$RELEASE"
+  deploy_restart
 }
 
 cmd_deploy() {
-  # S5: --ref <sha>.
-  [ "${2-}" != --ref ] || die "deploy --ref isn't implemented yet."
-  if [ "$#" -ne 1 ] || [ -z "$1" ] || [[ $1 == -* ]]; then
-    die "Usage: sudo shipit deploy <github-url | app>"
-  fi
+  local usage="Usage: sudo shipit deploy <github-url | app> [--ref <sha>]"
+  case $# in
+    1) ;;
+    3)
+      [ "$2" = --ref ] || die "$usage"
+      check_ref "$3" || exit 1
+      REF=$3
+      ;;
+    *) die "$usage" ;;
+  esac
+  if [ -z "$1" ] || [[ $1 == -* ]]; then die "$usage"; fi
   [ -e "$SHIPIT_ETC/host.conf" ] || die "This VPS isn't set up yet. Run: sudo shipit setup"
 
   DEPLOY_TMP=$(mktemp -d)

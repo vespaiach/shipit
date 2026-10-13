@@ -147,6 +147,14 @@ check_repo() {
   return 1
 }
 
+# --ref: a commit sha (4 to 64 lowercase hex characters). deploy then checks the branch contains it.
+check_ref() {
+  local LC_ALL=C
+  [[ $1 =~ ^[0-9a-f]{4,64}$ ]] && return 0
+  err "Invalid --ref '$1': give a commit sha from the app's branch, like 1a2b3c4."
+  return 1
+}
+
 # Env values are read literally by systemd and the build, so refuse anything they'd read differently.
 check_env_value() {
   local bad=$'\n\r"\'\\'
@@ -297,10 +305,13 @@ ask_hidden() {
 
 # ---- Locks ---------------------------------------------------------------------------------------
 # Each takes the lock file's path. The lock is held on the file descriptor in LOCK_FD until
-# lock_release or the process exits. Save LOCK_FD before taking a second lock.
+# lock_release or the process exits. Save LOCK_FD before taking a second lock. LOCK_FDS lists every
+# lock descriptor held, so lock_close_all can drop them before running code that may outlive us.
+LOCK_FDS=()
 
 lock_open() {
-  exec {LOCK_FD}>>"$1"
+  exec {LOCK_FD}>>"$1" || return 1
+  LOCK_FDS+=("$LOCK_FD")
 }
 
 # lock_try <path>: take the lock without waiting. Returns 1 if someone else holds it.
@@ -320,7 +331,21 @@ lock_wait() {
 }
 
 lock_release() {
+  local fd kept=()
   exec {LOCK_FD}>&-
+  for fd in "${LOCK_FDS[@]}"; do
+    [ "$fd" = "$LOCK_FD" ] || kept+=("$fd")
+  done
+  LOCK_FDS=("${kept[@]}")
+}
+
+# lock_close_all: close every held lock descriptor in this shell. Call it in a subshell before
+# running repo code, so a process the build leaves behind can't keep holding a lock.
+lock_close_all() {
+  local fd
+  for fd in "${LOCK_FDS[@]}"; do
+    exec {fd}>&-
+  done
 }
 
 # ---- Templates -----------------------------------------------------------------------------------
