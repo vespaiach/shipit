@@ -14,11 +14,14 @@ keep it, README.md and this file in step with the code.
   `app_using`), `app_name_from_repo`, `allocate_port`, locks (`lock_try`/`lock_wait`/`lock_release`)
   and `render`.
 - `lib/<command>.sh` — one file per command, defining `cmd_<command>`. `libexec/` holds what systemd
-  runs; `templates/` holds what `render` fills in.
+  runs; `templates/` (`$SHIPIT_TEMPLATES`) holds what `render` fills in. `lib/setup.sh` keeps the
+  host-touching steps (`setup_*`) thin and puts the logic in small stdin/argument-driven helpers
+  (`node_lts_major`, `sshd_ports`, `session_used_key`, `is_replaceable`, …) that the unit tests call.
 - `install.sh` — copies `bin lib libexec templates` to `/usr/local/lib/shipit`, links
   `/usr/local/bin/shipit`.
 - `test/unit/*.bats` (`make test`), `test/golden/` (expected rendered output), `test/fixtures/`,
-  `test/e2e/run.sh` plus `test/e2e/scenarios/*.sh` (Incus VM, by hand).
+  `test/e2e/run.sh` plus `test/e2e/scenarios/*.sh` and `test/e2e/helpers.sh` (Incus VM, by hand). The
+  scenarios share one VM and run in name order, so each one leaves the VM as the next expects.
 - `reference/tracklite-ops/` — the original scripts being generalised. Read-only; not linted.
 
 ## Engineering rules
@@ -40,7 +43,9 @@ keep it, README.md and this file in step with the code.
 - **Validate on a temp copy, then install**: render to a temp file, check it (`visudo -cf`,
   `caddy validate`, `systemd-analyze verify`, `nft -c -f`, `sshd -t`), then `install -m`.
 - **Atomic switches**: `ln -s target link.new && mv -T link.new link`.
-- **Caddy is reloaded, never restarted.** Only overwrite files marked `# managed by shipit`.
+- **Caddy is reloaded, never restarted.** Only overwrite files marked `# managed by shipit` (setup
+  also replaces a config that is still its package's untouched default, checked against dpkg's
+  conffile md5). Write through `install_if_changed`, so a re-run changes no file.
 - **Messages** are plain sentences that say what happened and what to do next. Use the exact wording
   the plan gives (for example the root message and the lock message).
 - Keep changes small and in scope. No speculative options or abstractions.

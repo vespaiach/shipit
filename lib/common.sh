@@ -10,6 +10,9 @@ SHIPIT_VAR=/var/lib/shipit
 # The owner every file root sources from SHIPIT_ETC must have. Tests set it to their own uid.
 SHIPIT_OWNER_UID=0
 
+# Where render's templates live: templates/ next to lib/, in a checkout and when installed.
+SHIPIT_TEMPLATES=${BASH_SOURCE[0]%/*}/../templates
+
 # The first port deploy hands out, and the marker on every file shipit writes.
 FIRST_APP_PORT=3001
 MANAGED_MARKER='# managed by shipit'
@@ -128,6 +131,24 @@ check_env_value() {
     err "Env values can't start or end with whitespace."
     return 1
   fi
+}
+
+# The admin account setup uses: root, or a named login user other than the deploy account.
+check_admin_user() {
+  local LC_ALL=C
+  if [[ $1 =~ ^[a-z][a-z0-9_-]{0,31}$ ]] && [ "$1" != "$DEPLOY_USER" ]; then
+    return 0
+  fi
+  err "Invalid admin username '$1': use root, or a lowercase name (letters, digits, _ or -) other than $DEPLOY_USER."
+  return 1
+}
+
+# The ACME email goes into the Caddyfile and host.conf, so only plain address characters are allowed.
+check_email() {
+  local LC_ALL=C
+  [[ $1 =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] && return 0
+  err "Invalid email '$1': use an address like you@example.com, or leave it blank."
+  return 1
 }
 
 # Root sources files from SHIPIT_ETC, so each must be a regular file owned by root and not writable

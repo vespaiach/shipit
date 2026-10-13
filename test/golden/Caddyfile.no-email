@@ -1,0 +1,3 @@
+# managed by shipit — one site per file in /etc/caddy/sites
+
+import /etc/caddy/sites/*.caddy

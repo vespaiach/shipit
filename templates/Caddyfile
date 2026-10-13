@@ -1,0 +1,6 @@
+# managed by shipit — one site per file in /etc/caddy/sites
+{
+	email ${ACME_EMAIL}
+}
+
+import /etc/caddy/sites/*.caddy
