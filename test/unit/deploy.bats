@@ -10,8 +10,12 @@ setup() {
   load_common
   # shellcheck source=lib/deploy.sh
   . "$REPO_ROOT/lib/deploy.sh"
+  # deploy's commands run as deployer; here as the current user, with the same clean environment.
+  # shellcheck disable=SC2329 # called by the deploy functions under test
+  as_deployer() { (cd / && env -i HOME="$HOME" PATH="$PATH" "$@"); }
   golden=$REPO_ROOT/test/golden
   fixture=$REPO_ROOT/test/fixtures/next-app
+  node_fixture=$REPO_ROOT/test/fixtures/node-app
   APP=tracklite
   DOMAIN=tracklite.example.com
   PORT=3001
@@ -170,11 +174,6 @@ matches() {
   : >"$d/package-lock.json"
   run zero_config_check "$d"
   [ "$status" -eq 1 ]
-}
-
-@test "zero config: one web process" {
-  run release_processes "$fixture"
-  [ "$output" = web ]
 }
 
 # ---- Repo, branch and app name -------------------------------------------------------------------
@@ -397,4 +396,312 @@ BLANK=' ]
   run --separate-stderr deploy_resolve nope
   [ "$status" -eq 1 ]
   [[ $stderr == *"There's no app named nope"* ]]
+}
+
+# ---- deploy.conf ---------------------------------------------------------------------------------
+
+@test "process names: the fixture's web and worker, rendered into the target" {
+  need_envsubst
+  mapfile -t procs < <(conf_processes <"$node_fixture/deploy.conf")
+  [ "${procs[*]}" = 'web worker' ]
+  matches app.target render_target "${procs[@]}"
+}
+
+@test "process names: only PROCESS_<name>= at the start of a line counts" {
+  run conf_processes <<'EOF'
+# PROCESS_commented="no"
+  PROCESS_indented="no"
+	PROCESS_tabbed="no"
+export PROCESS_exported="no"
+PROCESS_$(touch /tmp/pwned)="no"
+PROCESS_`id`="no"
+PROCESS_${X}="no"
+PROCESS_Upper="no"
+PROCESS_9lives="no"
+PROCESS_dash-ed="no"
+PROCESS_spaced ="no"
+PROCESS_plus+="no"
+PROCESS_web="node server.js $(id); PROCESS_inline=1"
+PROCESS_worker=$(echo evil)
+PROCESS_web="again"
+PROCESS_mail_2="node mail.js"
+ # PROCESS_x=1
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = $'web\nworker\nmail_2' ]
+  [ ! -e /tmp/pwned ]
+}
+
+@test "process names: none in a deploy.conf without PROCESS_ lines" {
+  run conf_processes <<<$'INSTALL=x\nBUILD=y'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "app.target with several processes matches the golden file" {
+  need_envsubst
+  mapfile -t procs < <(conf_processes <<<$'PROCESS_web=a\n  PROCESS_hidden=b\nPROCESS_worker=c\nPROCESS_mailer=d')
+  matches app.target.three render_target "${procs[@]}"
+}
+
+@test "HEALTH_PATH: plain paths, quoted or with a comment, and the last one wins" {
+  local line
+  for line in 'HEALTH_PATH=/health' 'HEALTH_PATH="/health"' "HEALTH_PATH='/health'" \
+    'HEALTH_PATH=/health                     # optional; strict' 'HEALTH_PATH=/health   '; do
+    run conf_health_path <<<"$line"
+    [ "$status" -eq 0 ] && [ "$output" = /health ] || {
+      echo "$line gave $output"
+      return 1
+    }
+  done
+  run conf_health_path <<<$'HEALTH_PATH=/first\nHEALTH_PATH=/api/v1/health.json\n'
+  [ "$output" = /api/v1/health.json ]
+  run conf_health_path <"$node_fixture/deploy.conf"
+  [ "$output" = /health ]
+}
+
+@test "HEALTH_PATH: unset, empty, indented or commented means none" {
+  local conf
+  for conf in 'INSTALL=x' 'HEALTH_PATH=' '  HEALTH_PATH=$(id)' '# HEALTH_PATH=/x' 'export HEALTH_PATH=/x'; do
+    run conf_health_path <<<"$conf"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || {
+      echo "$conf gave $output"
+      return 1
+    }
+  done
+}
+
+@test "HEALTH_PATH: anything but a plain path is refused, naming the line" {
+  local line
+  for line in 'HEALTH_PATH=$(id)' 'HEALTH_PATH=/h$(id)' 'HEALTH_PATH=`id`' 'HEALTH_PATH=health' \
+    'HEALTH_PATH=/a b' 'HEALTH_PATH=/h;id' 'HEALTH_PATH=/h#x' 'HEALTH_PATH="/h' 'HEALTH_PATH=/h?x=1' \
+    'HEALTH_PATH=$HOME' 'HEALTH_PATH=http://evil/' 'HEALTH_PATH=/h && id'; do
+    run --separate-stderr conf_health_path <<<$'INSTALL=x\n'"$line"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $line"
+      return 1
+    }
+    [[ $stderr == "deploy.conf line 2: HEALTH_PATH must be a plain path"* ]]
+  done
+}
+
+# deploy_commands_in <release>: runs D3 on the release with as_deployer stubbed.
+deploy_commands_in() {
+  RELEASE=$1
+  DEPLOY_TMP=$BATS_TEST_TMPDIR/tmp
+  mkdir -p "$DEPLOY_TMP"
+  deploy_commands
+  printf '%s|%s\n' "${PROCESSES[*]}" "$HEALTH_PATH"
+}
+
+@test "D3: a release with deploy.conf uses its processes and HEALTH_PATH" {
+  run deploy_commands_in "$node_fixture"
+  [ "$status" -eq 0 ]
+  [ "$output" = 'web worker|/health' ]
+}
+
+@test "D3: zero config runs web with the lenient health check" {
+  command -v jq >/dev/null || skip "jq isn't installed"
+  run deploy_commands_in "$fixture"
+  [ "$status" -eq 0 ]
+  [ "$output" = 'web|' ]
+}
+
+@test "D3: deploy.conf must set INSTALL, BUILD and a process, and not MIGRATE yet" {
+  local d=$BATS_TEST_TMPDIR/rel
+  mkdir -p "$d"
+  printf '%s\n' 'BUILD=b' >"$d/deploy.conf"
+  run --separate-stderr deploy_commands_in "$d"
+  [ "$status" -eq 1 ]
+  [ "$stderr" = 'deploy.conf must set INSTALL PROCESS_<name>.' ]
+  printf '%s\n' 'INSTALL=i' 'BUILD=b' 'MIGRATE=m' 'PROCESS_web="x --port $PORT"' >"$d/deploy.conf"
+  run --separate-stderr deploy_commands_in "$d"
+  [ "$status" -eq 1 ]
+  [[ $stderr == "deploy.conf sets MIGRATE"* ]]
+}
+
+@test "D3: a process only a computed line defines doesn't count" {
+  local d=$BATS_TEST_TMPDIR/rel
+  mkdir -p "$d"
+  printf '%s\n' 'INSTALL=i' 'BUILD=b' '  PROCESS_web=x' >"$d/deploy.conf"
+  run --separate-stderr deploy_commands_in "$d"
+  [ "$status" -eq 1 ]
+  [[ $stderr == "deploy.conf defines no process to run."* ]]
+}
+
+@test "build: deploy.conf's commands run with the env file's values, literally" {
+  local d=$BATS_TEST_TMPDIR/rel
+  mkdir -p "$d"
+  printf '%s\n' "INSTALL='echo \"install \$SECRET\"'" 'BUILD="echo build on $PORT"' >"$d/deploy.conf"
+  run env PORT=3005 bash -c "$BUILD_SCRIPT" build "$d" <<<$'SECRET=a $(id) b\nOTHER=1'
+  [ "$status" -eq 0 ]
+  [ "$output" = $'== echo "install $SECRET"\ninstall a $(id) b\n== echo build on 3005\nbuild on 3005' ]
+}
+
+# ---- .env.example --------------------------------------------------------------------------------
+
+@test ".env.example keys: only KEY= at the start of a line counts" {
+  run env_example_keys <<'EOF'
+# COMMENTED=1
+  INDENTED=1
+	TABBED=1
+export EXPORTED=1
+$(touch /tmp/pwned)=1
+`id`=1
+lower=1
+MIXED_case=1
+9LIVES=1
+SPACED =1
+DATABASE_URL=postgres://x
+API_KEY=
+GREETING=hello $(id)
+API_KEY=again
+_PRIVATE=
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = $'DATABASE_URL\nAPI_KEY\nGREETING\n_PRIVATE' ]
+  [ ! -e /tmp/pwned ]
+}
+
+@test ".env.example keys: the fixture's" {
+  run env_example_keys <"$node_fixture/.env.example"
+  [ "$output" = $'GREETING\nAPI_TOKEN' ]
+}
+
+@test "missing keys: those the env file has, PORT and NODE_ENV are never asked" {
+  local f=$BATS_TEST_TMPDIR/env
+  run env_missing_keys "$f" <<<$'A\nPORT\nNODE_ENV\nB'
+  [ "$output" = $'A\nB' ]
+  printf '%s\n' 'APP_URL=https://a.example.com' 'A=' 'AB=1' '# B=1' >"$f"
+  run env_missing_keys "$f" <<<$'APP_URL\nA\nB\nC'
+  [ "$output" = $'B\nC' ]
+}
+
+# ---- Private repos -------------------------------------------------------------------------------
+
+@test "SSH URL for a deploy key: GitHub HTTPS becomes git@, SSH URLs stay, file:// has none" {
+  [ "$(repo_ssh_url https://github.com/me/my-app)" = git@github.com:me/my-app.git ]
+  [ "$(repo_ssh_url https://github.com/me/my-app.git)" = git@github.com:me/my-app.git ]
+  [ "$(repo_ssh_url git@github.com:me/my-app.git)" = git@github.com:me/my-app.git ]
+  [ "$(repo_ssh_url ssh://git@localhost/home/git/a.git)" = ssh://git@localhost/home/git/a.git ]
+  run repo_ssh_url file:///srv/git/a.git
+  [ "$status" -eq 1 ]
+  run repo_ssh_url 'https://github.com/me/a b'
+  [ "$status" -eq 1 ]
+}
+
+@test "deploy key: only SSH URLs use one" {
+  repo_uses_key git@github.com:me/a.git
+  repo_uses_key ssh://git@localhost/srv/a.git
+  run ! repo_uses_key https://github.com/me/a
+  run ! repo_uses_key file:///srv/git/a.git
+}
+
+@test "deploy key: GitHub's page for adding it, and none for other hosts" {
+  [ "$(deploy_key_url git@github.com:Me/My-App.git)" = https://github.com/me/my-app/settings/keys/new ]
+  [ "$(deploy_key_url https://github.com/me/app)" = https://github.com/me/app/settings/keys/new ]
+  [ -z "$(deploy_key_url ssh://git@localhost/srv/a.git)" ]
+}
+
+@test "deploy key: ssh uses only that key and the pinned host keys" {
+  [ "$(git_ssh_command /home/deployer/.ssh/shipit_a)" = 'ssh -i /home/deployer/.ssh/shipit_a -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null' ]
+}
+
+# fake_git <failures>: a git stub that logs each call and its GIT_SSH_COMMAND, and fails the first
+# <failures> times (or always, with -1).
+fake_git() {
+  : >"$BATS_TEST_TMPDIR/git.calls"
+  stub git '
+calls=$(($(wc -l <"'"$BATS_TEST_TMPDIR"'/git.calls") + 1))
+printf "%s|%s\n" "$*" "${GIT_SSH_COMMAND-}" >>"'"$BATS_TEST_TMPDIR"'/git.calls"
+[ '"$1"' -ge 0 ] && [ "$calls" -gt '"$1"' ] || exit 128
+printf "ref: refs/heads/trunk\tHEAD\n0123456789abcdef0123456789abcdef01234567\tHEAD\n"'
+}
+
+@test "new app: a repo anonymous git can read is public, over HTTPS" {
+  fake_git 0
+  run new_app_repo git@github.com:me/app.git "$BATS_TEST_TMPDIR/head"
+  [ "$status" -eq 0 ]
+  [ "$output" = https://github.com/me/app.git ]
+  [ "$(default_branch <"$BATS_TEST_TMPDIR/head")" = trunk ]
+  grep -qx 'ls-remote --symref https://github.com/me/app.git HEAD|' "$BATS_TEST_TMPDIR/git.calls"
+}
+
+@test "new app: a repo anonymous git can't read is private, over SSH" {
+  fake_git -1
+  run new_app_repo https://github.com/me/app "$BATS_TEST_TMPDIR/head"
+  [ "$status" -eq 0 ]
+  [ "$output" = git@github.com:me/app.git ]
+  run new_app_repo git@github.com:me/app.git "$BATS_TEST_TMPDIR/head"
+  [ "$output" = git@github.com:me/app.git ]
+}
+
+@test "new app: ssh:// URLs always use a deploy key, and an unreadable file:// URL fails" {
+  fake_git 0
+  run new_app_repo ssh://git@localhost/home/git/a.git "$BATS_TEST_TMPDIR/head"
+  [ "$output" = ssh://git@localhost/home/git/a.git ]
+  [ ! -s "$BATS_TEST_TMPDIR/git.calls" ]
+  fake_git -1
+  run new_app_repo file:///srv/git/missing.git "$BATS_TEST_TMPDIR/head"
+  [ "$status" -eq 1 ]
+}
+
+# repo_access_as <repo>: runs deploy_repo_access for the app with deployer's home in the temp dir.
+repo_access_as() {
+  REPO=$1
+  DEPLOY_TMP=$BATS_TEST_TMPDIR/tmp
+  mkdir -p "$DEPLOY_TMP"
+  deploy_repo_access
+}
+
+stub_deployer_home() {
+  stub getent '[ "$2" = deployer ] && echo "deployer:x:999:999::'"$BATS_TEST_TMPDIR"'/home:/usr/sbin/nologin"'
+  stub ssh-keygen 'while [ $# -gt 1 ]; do [ "$1" = -f ] && f=$2; shift; done; echo private >"$f"; echo "ssh-ed25519 AAAAtest shipit" >"$f.pub"'
+  stub hostname 'echo vps'
+}
+
+@test "repo access: a public repo needs no key and no ls-remote" {
+  stub_deployer_home
+  fake_git 0
+  run repo_access_as https://github.com/me/app
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -s "$BATS_TEST_TMPDIR/git.calls" ]
+  [ ! -e "$BATS_TEST_TMPDIR/home/.ssh" ]
+}
+
+@test "repo access: a working deploy key prints nothing" {
+  stub_deployer_home
+  fake_git 0
+  run repo_access_as git@github.com:me/app.git
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -f "$BATS_TEST_TMPDIR/home/.ssh/shipit_$APP" ]
+  grep -qF "ls-remote --symref git@github.com:me/app.git HEAD|ssh -i $BATS_TEST_TMPDIR/home/.ssh/shipit_$APP -o IdentitiesOnly=yes" \
+    "$BATS_TEST_TMPDIR/git.calls"
+}
+
+@test "repo access: prints the key and GitHub's page, then retries until the key works" {
+  stub_deployer_home
+  fake_git 3
+  KEY_RETRY_SECONDS=0
+  run repo_access_as git@github.com:me/app.git
+  [ "$status" -eq 0 ]
+  [[ $output == *"https://github.com/me/app/settings/keys/new"* ]]
+  [[ $output == *$'\n  ssh-ed25519 AAAAtest shipit\n'* ]]
+  [ "$(grep -c 'ssh-ed25519' <<<"$output")" = 1 ]
+  [[ $output == *"Waiting for the repo to accept it"* ]]
+  [ "${lines[${#lines[@]} - 1]}" = "The deploy key works." ]
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/git.calls" | tr -d ' ')" = 4 ]
+  [ "$(default_branch <"$BATS_TEST_TMPDIR/tmp/head")" = trunk ]
+}
+
+@test "repo access: an existing key is kept" {
+  stub_deployer_home
+  fake_git 0
+  mkdir -p "$BATS_TEST_TMPDIR/home/.ssh"
+  echo old >"$BATS_TEST_TMPDIR/home/.ssh/shipit_$APP"
+  run repo_access_as ssh://git@localhost/home/git/a.git
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/home/.ssh/shipit_$APP")" = old ]
 }

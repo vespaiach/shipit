@@ -1,0 +1,7 @@
+# managed by shipit — Wants= lists the release's processes
+[Unit]
+Description=tracklite (all processes)
+Wants=tracklite@web.service tracklite@worker.service tracklite@mailer.service
+
+[Install]
+WantedBy=multi-user.target

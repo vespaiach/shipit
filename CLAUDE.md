@@ -14,8 +14,8 @@ keep it, README.md and this file in step with the code.
   `app_using`), `app_name_from_repo`, `allocate_port`, file and prompt helpers (`install_if_changed`,
   `is_shipit_file`, `user_home`, `ask`), locks (`lock_try`/`lock_wait`/`lock_release`) and `render`.
 - `lib/<command>.sh` — one file per command, defining `cmd_<command>`. `lib/deploy.sh` follows plan
-  §3's A–D steps (`deploy_*` functions, called in order by `cmd_deploy`) and marks where S3–S5 slot
-  in with `S3:`/`S4:`/`S5:` comments. `libexec/` holds what systemd runs: `libexec/run` is the
+  §3's A–D steps (`deploy_*` functions, called in order by `cmd_deploy`) and marks where S4–S5 slot
+  in with `S4:`/`S5:` comments. `libexec/` holds what systemd runs: `libexec/run` is the
   launcher, and it runs `launch "$@"` only when executed, so the tests source it and call `launch`.
   `templates/` (`$SHIPIT_TEMPLATES`) holds what `render` fills in. `lib/setup.sh` keeps the
   host-touching steps (`setup_*`) thin and puts the logic in small stdin/argument-driven helpers
@@ -38,8 +38,9 @@ keep it, README.md and this file in step with the code.
   `id` through `PATH`, so call those commands by name (no absolute paths, no `$EUID`).
 - **Validators** are `check_<thing> <value> [app]`: silent on success, print the reason to stderr and
   return 1 on failure. Validate every value read from a config or typed by a person before using it.
-- **Root never runs or sources repo content.** Read repo files as data only (`grep -E` with strict
-  patterns, `jq`, `git show` as `$DEPLOY_USER`). Repo commands run through `as_deployer` (clean
+- **Root never runs or sources repo content.** Read repo files as data only (`grep -E`/`awk` with strict
+  patterns, `jq`, `git show` as `$DEPLOY_USER`), and read release files through `release_cat` (as
+  `$DEPLOY_USER`, so a symlink in the repo can't point root elsewhere). Repo commands run through `as_deployer` (clean
   environment, from `/`); secrets reach the build on stdin, never on a command line. Root sources
   only files under `$SHIPIT_ETC`, and only after `check_sourced_file` (or via `conf_get`, which does it).
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
