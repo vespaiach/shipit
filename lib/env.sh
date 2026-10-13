@@ -15,13 +15,25 @@ env_edit() {
   ${EDITOR:-nano} "$1"
 }
 
+# env_check_reserved <file> <name>: refuses PORT and NODE_ENV. The unit sets them, and systemd lets
+# EnvironmentFile= override Environment=, so a value here would move the app off its port.
+env_check_reserved() {
+  local key
+  for key in PORT NODE_ENV; do
+    if grep -q "^$key=" "$1"; then
+      err "$2: remove $key. shipit sets it in the app's unit."
+      return 1
+    fi
+  done
+}
+
 # env_edit_until_valid <copy> <env file>: edits the copy until every line passes, asking after each
 # refusal whether to edit again. Fails, with the env file untouched, when the answer is no.
 env_edit_until_valid() {
   local answer
   while :; do
     env_edit "$1" || die "The editor failed, so $2 wasn't changed."
-    env_file_lines "$1" "$2" >/dev/null && return 0
+    env_file_lines "$1" "$2" >/dev/null && env_check_reserved "$1" "$2" && return 0
     ask "Edit it again? [Y/n] " answer || die "$2 wasn't changed."
     case $answer in
       '' | [Yy] | [Yy][Ee][Ss]) ;;

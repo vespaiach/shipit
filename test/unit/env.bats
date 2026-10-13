@@ -152,6 +152,18 @@ edits() { cat "$BATS_TEST_TMPDIR/edits"; }
   grep -qx GREETING=hello "$env"
 }
 
+@test "edit until valid: PORT and NODE_ENV are refused, since the unit sets them" {
+  local key
+  for key in PORT NODE_ENV; do
+    editor "GREETING=hi"$'\n'"$key=1" 'GREETING=hi'
+    rm -f "$BATS_TEST_TMPDIR/edits"
+    run --separate-stderr env_edit_until_valid "$new" /etc/node_app/env <<<''
+    [ "$status" -eq 0 ]
+    [ "$(edits)" = 2 ]
+    [[ $stderr == *"/etc/node_app/env: remove $key."* ]]
+  done
+}
+
 @test "edit until valid: with no terminal to ask in, a bad edit aborts" {
   editor 'A= x'
   run env_edit_until_valid "$new" "$env" </dev/null
