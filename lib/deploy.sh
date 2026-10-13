@@ -434,7 +434,7 @@ render_site() {
 as_deployer() {
   local home
   home=$(user_home "$DEPLOY_USER")
-  (cd / && runuser -u "$DEPLOY_USER" -- env -i HOME="$home" PATH="$SYSTEM_PATH" LANG=C.UTF-8 "$@")
+  (lock_close_all && cd / && runuser -u "$DEPLOY_USER" -- env -i HOME="$home" PATH="$SYSTEM_PATH" LANG=C.UTF-8 "$@")
 }
 
 # release_has <file> and release_cat <file>: read a file in the release as deployer, so a symlink in
