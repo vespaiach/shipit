@@ -265,15 +265,15 @@ It doesn't roll forward or touch the database. Because the launcher reads `curre
 
 ### `shipit status [app]`
 
-For each app, or the one named: the `current` and `previous` releases (time and sha), `systemctl is-active` for each instance, the health check's status code, the last line of `deploy.log`, and the last backup's file name and result. It also runs `caddy validate` once and reports the result. It's read-only.
+For each app, or the one named: the `current` and `previous` releases (time and sha), `systemctl is-active` for each instance, the health check's status code, the last line of `deploy.log`, and the last backup's file name and result. It also runs `caddy validate` once and reports the result. It's read-only. It takes no lock. The instances are the current release's processes (read like deploy reads them), and anything but `active` is shown in capitals. The backup result is how the last `shipit-backup@<app>.service` run ended (`systemctl show -p Result -p ExecMainExitTimestamp`: success, failed, or never run). It ends by saying where the backups are (R9).
 
 ### `shipit logs <app> [process | access | deploy]`
 
-Runs `tail -n 100 -F` on the chosen file, or on all of the app's current log files when nothing is named.
+Runs `tail -n 100 -F` on the chosen file, or on all of the app's current log files (every `*.log` in `/var/log/shipit/<app>/`; not rotated files or `builds/`) when nothing is named. A process name follows `<process>.log` and `<process>.error.log`. The name must pass the process-name rule, and a name with no log is refused with the list of those there are.
 
 ### `shipit env <app>`
 
-Opens a copy of `/etc/<app>/env` in `$EDITOR` (falling back to `nano`), validates every line against the env-value rule, installs it with mode 600, then restarts `<app>.target`.
+Takes the app lock, so it can't race a deploy or rollback. Opens a private copy of `/etc/<app>/env` (in a root-only temp folder, mode 600) in `$EDITOR` (falling back to `nano`), and validates every line the way systemd and the build read the file: `KEY=value` with a key of letters, digits and `_`, blank lines and `#`/`;` comments allowed, and the env-value rule on every value. A bad line is named, and it offers to edit again or give up, changing nothing. If the file changed, it's installed as `root:root` 600 and `<app>.target` is restarted; otherwise nothing is restarted.
 
 ### `shipit backup <app>`
 

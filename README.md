@@ -6,11 +6,11 @@ units, Caddy site and PostgreSQL database, plus one-step rollback and daily loca
 
 The design is [docs/plan.md](docs/plan.md).
 
-> **Status:** milestone S5. `shipit setup` works, and `shipit deploy` deploys public or private
+> **Status:** milestone S6. `shipit setup` works, and `shipit deploy` deploys public or private
 > GitHub repos, zero-config Next.js apps or apps with a `deploy.conf`, asks for `.env.example` keys,
 > creates a PostgreSQL database per app and runs `MIGRATE`. Redeploys (`--ref`, config changes,
-> `HEALTH_FAIL`) and `shipit rollback` work. No backups yet (the backup timer is enabled from S7).
-> Every other command except `help` says it isn't implemented yet.
+> `HEALTH_FAIL`), `shipit rollback`, `status`, `logs` and `env` work. No backups yet (the backup timer
+> is enabled from S7): `backup` and `restore` say they aren't implemented yet.
 > See the milestones in plan §8.
 
 ## Quick start
@@ -94,6 +94,21 @@ run `sudo shipit rollback <app>`; `HEALTH_FAIL=rollback` switches back by itself
 `current` back at `previous`, removes `previous` (so a second rollback refuses), re-renders the target
 from that release's processes, restarts it and checks health. It never touches the database, so the
 previous release must work with the newer migrations.
+
+**Status, logs and env.** `shipit status [app]` is read-only and takes no lock. For each app (or the
+one named) it shows the `current` and `previous` releases (sha and UTC time), `systemctl is-active` for
+each of the current release's processes (anything but `active` is shown in capitals, with where to
+look), the health check's status code, the last line of `deploy.log`, and the newest backup's file
+name with how the last `shipit-backup@<app>` run ended. It then runs `caddy validate` once, and says
+the backups are in `/var/backups/shipit/<app>/` on the VPS's own disk (Hostinger's snapshots are the
+off-site copy). `shipit logs <app> [name]` runs `tail -n 100 -F` on `<name>.log` (plus
+`<name>.error.log` for a process), or on every `*.log` of the app when no name is given; an unknown
+name is refused with the list of names there are. `shipit env <app>` takes the app lock, opens a
+private copy of `/etc/<app>/env` in `$EDITOR` (`nano` by default; `sudo` usually drops `EDITOR`, so use
+`sudo EDITOR=vim shipit env <app>` to choose), and checks every line the way systemd and the build read
+it: `KEY=value`, blank lines and `#` or `;` comments, and the env-value rule. A bad line is named, and
+you can edit again or give up (nothing is changed). A changed file is installed as `root:root` 600 and
+`<app>.target` is restarted; an unchanged one restarts nothing.
 
 **Migrations.** `MIGRATE` (from `deploy.conf`, or `npm run db:migrate` for a zero-config app whose
 `package.json` has that script) runs as `deployer` after the build and before the switch, with the env
