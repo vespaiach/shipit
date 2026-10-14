@@ -1,0 +1,34 @@
+# Runs `make` (lint and the bats unit tests) on every push to main and every pull request (plan §7).
+# Tests that need root still skip here; the e2e scenarios run in an Incus VM by hand.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    env:
+      SHFMT_VERSION: v3.14.1
+    steps:
+      - uses: actions/checkout@v4
+
+      # Caddy from its own apt repo, as setup installs it, so caddy validate sees the same version.
+      - name: Install tools
+        run: |
+          curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+          curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+            | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y bats shellcheck caddy gettext-base jq logrotate nftables openssh-server sudo
+          sudo curl -fsSL -o /usr/local/bin/shfmt \
+            "https://github.com/mvdan/sh/releases/download/$SHFMT_VERSION/shfmt_${SHFMT_VERSION}_linux_amd64"
+          sudo chmod +x /usr/local/bin/shfmt
+
+      - run: make

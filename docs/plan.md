@@ -62,6 +62,7 @@ It generalises Tracklite's `ops/` folder (`reference/tracklite-ops/`) and keeps 
 shipit/
 ├── README.md                    what it is, the two-step quick start, the day-to-day commands
 ├── CLAUDE.md                    engineering rules and how to work, for later sessions
+├── .github/workflows/check.yml  CI: `make` on every push to main and every PR
 ├── install.sh                   root: copies lib/ libexec/ templates/ to /usr/local/lib/shipit, links /usr/local/bin/shipit
 ├── bin/shipit                   dispatcher: parses the command, requires root, sources lib/common.sh
 ├── lib/
@@ -547,7 +548,7 @@ Steps 1–7 can ship as soon as redeploys work in shipit (S5). Steps 8–10 wait
 ## 7. Testing
 
 - **Static checks in CI:** `bash -n`, `shellcheck` and `shfmt -i 2 -ci -bn -d` on `bin`, `lib`, `libexec`, `install.sh` and `test`.
-- **Unit tests with bats-core in CI** (`ubuntu-latest`, with `shellcheck`, `shfmt`, `bats`, `caddy`, `systemd` and `gettext-base` installed). Tests that need GNU tools, `flock` or root skip with a stated reason elsewhere, so CI is the real result. The tests cover:
+- **Unit tests with bats-core in CI** (`.github/workflows/check.yml` runs `make` on `ubuntu-latest` for every push to `main` and every PR, with `shellcheck`, `shfmt`, `bats`, Caddy from its own apt repo, `systemd`, `gettext-base`, `nftables`, `openssh-server` and `logrotate` installed). Tests that need GNU tools or `flock` skip with a stated reason elsewhere, so CI is the real result. CI doesn't run as root, so the few tests that need root (`nft -c`, `sshd -t`) skip there too and are covered by e2e. The tests cover:
   - the validators, with good and bad app, process, domain, port, repo, env-value and sourced-file values;
   - app-name derivation from a repo URL, and port allocation;
   - the `deploy.conf` process-name parser and the `.env.example` key parser (both must ignore `$(...)`, comments and indentation tricks);
