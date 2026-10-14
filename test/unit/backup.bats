@@ -187,7 +187,7 @@ printf 12345 >"'"$dir"'/db_a-20261013T120000Z.dump"'
   [ "$output" = 'The backup of db_a failed. Check: journalctl -u shipit-backup@db_a.service' ]
 }
 
-@test "shipit backup: refuses bad arguments, unknown apps, apps without a database or not deployed" {
+@test "shipit backup: refuses bad arguments, unknown apps, BACKUP=none or not deployed" {
   load_backup
   stub systemctl 'echo "$*" >>"'"$BATS_TEST_TMPDIR"'/systemctl.calls"'
   run cmd_backup
@@ -201,7 +201,11 @@ printf 12345 >"'"$dir"'/db_a-20261013T120000Z.dump"'
   write_app_conf web REPO=x DOMAIN=web.localhost PORT=3002 DATABASE=
   run cmd_backup web
   [ "$status" -eq 1 ]
-  [ "$output" = "web has no database (DATABASE is empty in $SHIPIT_ETC/apps/web.conf), so it has no backups." ]
+  [ "$output" = "web has no backups: BACKUP is none by default, because DATABASE is empty in $SHIPIT_ETC/apps/web.conf. Set BACKUP=state in $SHIPIT_ETC/apps/web.conf to back up $STATE_ROOT/web." ]
+  write_app_conf web REPO=x DOMAIN=web.localhost PORT=3002 DATABASE=web BACKUP=none
+  run cmd_backup web
+  [ "$status" -eq 1 ]
+  [ "$output" = "web has no backups, because $SHIPIT_ETC/apps/web.conf sets BACKUP=none." ]
   write_app_conf db_b REPO=x DOMAIN=db-b.localhost PORT=3003 DATABASE=db_b
   run cmd_backup db_b
   [ "$status" -eq 1 ]
@@ -289,7 +293,7 @@ x'; do
   [ ! -e "$SHIPIT_VAR/db_a.lock" ]
 }
 
-@test "shipit restore: refuses bad arguments and apps without a database" {
+@test "shipit restore: refuses bad arguments and BACKUP=none" {
   load_restore
   run cmd_restore
   [[ $output == Usage:* ]]
@@ -300,7 +304,7 @@ x'; do
   write_app_conf web REPO=x DOMAIN=web.localhost PORT=3002 DATABASE=
   run cmd_restore web
   [ "$status" -eq 1 ]
-  [[ $output == "web has no database"* ]]
+  [[ $output == "web has no backups: BACKUP is none by default"* ]]
 }
 
 # restore_stubs [pg_restore exit status]: systemctl logs its calls; the backup unit writes a new dump;
@@ -314,7 +318,7 @@ restore_stubs() {
 @test "restore_run: fresh backup, stop, pg_restore as postgres from the dump, start" {
   load_restore
   restore_stubs
-  APP=db_a DATABASE=db_a
+  APP=db_a DATABASE=db_a BACKUP_UNIT=shipit-backup@db_a.service BACKUP_EXT=dump
   printf old-data >"$dir/db_a-20261011T030000Z.dump"
   run restore_run "$dir/db_a-20261011T030000Z.dump"
   [ "$status" -eq 0 ]
@@ -327,7 +331,7 @@ restore_stubs() {
 
 @test "restore_run: the chosen dump is restored even if the fresh backup prunes it" {
   load_restore
-  APP=db_a DATABASE=db_a
+  APP=db_a DATABASE=db_a BACKUP_UNIT=shipit-backup@db_a.service BACKUP_EXT=dump
   printf oldest >"$dir/db_a-20261011T030000Z.dump"
   stub systemctl '[ "$1" != start ] || [ "$2" != shipit-backup@db_a.service ] || {
   printf now >"'"$dir"'/db_a-20261013T120000Z.dump"; rm "'"$dir"'/db_a-20261011T030000Z.dump"; }'
@@ -340,7 +344,7 @@ restore_stubs() {
 @test "restore_run: a failed pg_restore still starts the target again" {
   load_restore
   restore_stubs 1
-  APP=db_a DATABASE=db_a
+  APP=db_a DATABASE=db_a BACKUP_UNIT=shipit-backup@db_a.service BACKUP_EXT=dump
   : >"$dir/db_a-20261011T030000Z.dump"
   run restore_run "$dir/db_a-20261011T030000Z.dump"
   [ "$status" -eq 1 ]
@@ -352,7 +356,7 @@ restore_stubs() {
   load_restore
   stub systemctl 'echo "$*" >>"'"$BATS_TEST_TMPDIR"'/systemctl.calls"; exit 1'
   stub runuser 'touch "'"$BATS_TEST_TMPDIR"'/ran"'
-  APP=db_a DATABASE=db_a
+  APP=db_a DATABASE=db_a BACKUP_UNIT=shipit-backup@db_a.service BACKUP_EXT=dump
   : >"$dir/db_a-20261011T030000Z.dump"
   run restore_run "$dir/db_a-20261011T030000Z.dump"
   [ "$status" -eq 1 ]
@@ -367,9 +371,9 @@ load_deploy() {
   . "$REPO_ROOT/lib/deploy.sh"
   APP=db_a
   stub install 'echo "$*" >>"'"$BATS_TEST_TMPDIR"'/install.calls"'
-  # systemctl: is-enabled answers from the file "enabled"; enable and disable change it.
+  # systemctl: is-enabled answers from the file "enabled.<timer>"; enable and disable change it.
   stub systemctl 'echo "$*" >>"'"$BATS_TEST_TMPDIR"'/systemctl.calls"
-e="'"$BATS_TEST_TMPDIR"'/enabled"
+e="'"$BATS_TEST_TMPDIR"'/enabled.${!#}"
 case $1 in
   is-enabled) [ -e "$e" ] ;;
   enable) touch "$e" ;;
@@ -377,9 +381,9 @@ case $1 in
 esac'
 }
 
-@test "deploy_backups: an app with a database gets its folder and an enabled timer, once" {
+@test "deploy_backups: BACKUP=postgres gets its folder and an enabled timer, once" {
   load_deploy
-  DATABASE=db_a
+  DATABASE=db_a BACKUP=postgres
   run deploy_backups
   [ "$status" -eq 0 ]
   [ "$output" = "Enabled shipit-backup@db_a.timer: daily backups of db_a to $BACKUP_ROOT/db_a." ]
@@ -389,19 +393,45 @@ esac'
   run deploy_backups
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [ "$(cat "$BATS_TEST_TMPDIR/systemctl.calls")" = 'is-enabled --quiet shipit-backup@db_a.timer' ]
+  [ "$(cat "$BATS_TEST_TMPDIR/systemctl.calls")" = $'is-enabled --quiet shipit-state-backup@db_a.timer\nis-enabled --quiet shipit-backup@db_a.timer' ]
 }
 
-@test "deploy_backups: without a database, nothing; a timer left enabled is disabled, keeping dumps" {
+@test "deploy_backups: BACKUP=state gets a root-owned folder and the state timer, once" {
   load_deploy
-  DATABASE=''
+  DATABASE='' BACKUP=state
+  run deploy_backups
+  [ "$status" -eq 0 ]
+  [ "$output" = "Enabled shipit-state-backup@db_a.timer: daily backups of $STATE_ROOT/db_a to $BACKUP_ROOT/db_a." ]
+  [ "$(cat "$BATS_TEST_TMPDIR/install.calls")" = "-d -m 700 -o root -g root $BACKUP_ROOT/db_a" ]
+  grep -qx 'enable --quiet --now shipit-state-backup@db_a.timer' "$BATS_TEST_TMPDIR/systemctl.calls"
+  rm "$BATS_TEST_TMPDIR/systemctl.calls"
+  run deploy_backups
+  [ -z "$output" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/systemctl.calls")" = $'is-enabled --quiet shipit-backup@db_a.timer\nis-enabled --quiet shipit-state-backup@db_a.timer' ]
+}
+
+@test "deploy_backups: switching from postgres to state disables the postgres timer, keeping its dumps" {
+  load_deploy
+  touch "$BATS_TEST_TMPDIR/enabled.shipit-backup@db_a.timer"
+  DATABASE=db_a BACKUP=state
+  run deploy_backups
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "Disabled shipit-backup@db_a.timer, because db_a has BACKUP=state now. Its backups stay in $BACKUP_ROOT/db_a." ]
+  [ "${lines[1]}" = "Enabled shipit-state-backup@db_a.timer: daily backups of $STATE_ROOT/db_a to $BACKUP_ROOT/db_a." ]
+  [ ! -e "$BATS_TEST_TMPDIR/enabled.shipit-backup@db_a.timer" ]
+  [ -e "$BATS_TEST_TMPDIR/enabled.shipit-state-backup@db_a.timer" ]
+}
+
+@test "deploy_backups: BACKUP=none, nothing; a timer left enabled is disabled, keeping its files" {
+  load_deploy
+  DATABASE='' BACKUP=none
   run deploy_backups
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [ "$(cat "$BATS_TEST_TMPDIR/systemctl.calls")" = 'is-enabled --quiet shipit-backup@db_a.timer' ]
-  touch "$BATS_TEST_TMPDIR/enabled"
+  [ "$(cat "$BATS_TEST_TMPDIR/systemctl.calls")" = $'is-enabled --quiet shipit-backup@db_a.timer\nis-enabled --quiet shipit-state-backup@db_a.timer' ]
+  touch "$BATS_TEST_TMPDIR/enabled.shipit-backup@db_a.timer"
   run deploy_backups
-  [ "$output" = "Disabled shipit-backup@db_a.timer, because db_a has no DATABASE now. Its dumps stay in $BACKUP_ROOT/db_a." ]
+  [ "$output" = "Disabled shipit-backup@db_a.timer, because db_a has BACKUP=none now. Its backups stay in $BACKUP_ROOT/db_a." ]
   grep -qx 'disable --quiet --now shipit-backup@db_a.timer' "$BATS_TEST_TMPDIR/systemctl.calls"
   [ ! -e "$BATS_TEST_TMPDIR/install.calls" ]
 }

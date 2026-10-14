@@ -23,8 +23,9 @@ sudo shipit deploy https://github.com/<you>/<app>     # first deploy asks for th
 - **`setup`** installs PostgreSQL, Caddy and Node.js LTS, adds swap, a firewall, log rotation, the
   `deployer` build account and SSH hardening. It never overwrites a config it didn't write, and a
   re-run changes nothing.
-- **`deploy`** gives each app its own Linux user, port, systemd units, Caddy site (with HTTPS) and,
-  optionally, its own PostgreSQL database. It builds the branch as `deployer`, runs migrations, then
+- **`deploy`** gives each app its own Linux user, port, systemd units, Caddy site (with HTTPS), a
+  private state folder (`/var/lib/<app>`) that outlives releases and, optionally, its own PostgreSQL
+  database. It builds the branch as `deployer`, runs migrations, then
   switches `/opt/<app>/current` to the new release atomically, restarts the app and checks its health.
   A failed build or migration switches nothing. Later deploys ask nothing.
 - **Zero config** for a Next.js app with a `package-lock.json`. A `deploy.conf` in the repo sets custom
@@ -38,7 +39,7 @@ sudo shipit deploy https://github.com/<you>/<app>     # first deploy asks for th
 | `sudo shipit status [app]` | Releases, processes, health and backups |
 | `sudo shipit logs <app> [name]` | Follow the app's log files |
 | `sudo shipit env <app>` | Edit the app's secrets, then restart it |
-| `sudo shipit backup <app>` | Take a database backup now |
+| `sudo shipit backup <app>` | Take a backup now (database or state folder) |
 | `sudo shipit restore <app> [file \| latest]` | Restore a backup |
 
 Config examples are in [examples/](examples). The full design is [docs/plan.md](docs/plan.md).
@@ -51,6 +52,8 @@ Config examples are in [examples/](examples). The full design is [docs/plan.md](
 | Apps | Next.js on the system Node.js LTS, zero config; any Node app with a `deploy.conf` |
 | Source | GitHub, public (HTTPS) or private (deploy key) |
 | Database | PostgreSQL 18 (PGDG), one shared cluster, one role and database per app |
+| State on disk | `/var/lib/<app>` per app (systemd `StateDirectory=`), for SQLite files, uploads and snapshots; point the app at it in its env file, like `DATA_DIR=/var/lib/<app>` |
+| Backups | Daily, local: `pg_dump` (`BACKUP=postgres`) or a `.tar.gz` of the state folder (`BACKUP=state`, `BACKUP_PATHS`) |
 | Web server | Caddy, automatic HTTPS |
 | Processes | systemd, one template unit and target per app |
 
@@ -60,8 +63,15 @@ Config examples are in [examples/](examples). The full design is [docs/plan.md](
 - One system Node version for every app, fixed when `setup` first runs.
 - Rollback goes back one release only and never undoes migrations: the previous release must work
   with the newer schema.
-- Backups are daily `pg_dump` files on the VPS's own disk, and logs are local files. There is no
-  off-site copy and no alerting; use your provider's snapshots for that.
+- Backups (`pg_dump` files or state-folder archives) stay on the VPS's own disk, and logs are local
+  files. There is no off-site copy and no alerting; use your provider's snapshots for that.
+- Rollback doesn't undo changes to the state folder: whatever the newer release wrote stays. Apps that
+  migrate their data when they start should set `HEALTH_FAIL=rollback`, and keep those migrations
+  readable by the previous release.
+- A state backup copies files as they are, so a live SQLite database (WAL mode) isn't safely backed up.
+  Have the app write snapshots (`VACUUM INTO`) and list those in `BACKUP_PATHS`.
+- Native modules that need compiling (better-sqlite3, sharp without a matching prebuilt binary) need
+  `EXTRA_PACKAGES="build-essential python3"` in `/etc/shipit/host.conf`, then `sudo shipit setup`.
 - Single host. No multi-server, load balancing or zero-downtime blue/green; a deploy restarts the app.
 
 ## Security notes
@@ -70,8 +80,8 @@ Config examples are in [examples/](examples). The full design is [docs/plan.md](
   build, migrations) and sees that app's secrets during the build. `deployer` owns every app's code,
   so push access to any one app's repo can change every app. Only deploy repos you trust.
 - Root never runs or sources repo content; it reads repo files only as data.
-- Each app runs as its own user, can't read other apps' code or connect to their databases, and gets
-  its secrets from systemd. Secrets live in `/etc/<app>/env` (`root:root` 600).
+- Each app runs as its own user, can't read other apps' code, state folders or backups, or connect to
+  their databases, and gets its secrets from systemd. Secrets live in `/etc/<app>/env` (`root:root` 600).
 - `setup` turns off SSH password logins (only when you logged in with a key), pins GitHub's SSH host
   keys and enables a firewall. Every config is validated on a temp copy before it's installed.
 

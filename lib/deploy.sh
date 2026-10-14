@@ -85,7 +85,7 @@ printf "== %s\n" "$MIGRATE"
 bash -c "$MIGRATE"'
 
 # This deploy's state. The app config's values (REPO BRANCH DOMAIN PORT DATABASE HEALTH_FAIL
-# LOG_REDACT_QUERY) are globals too, set by deploy_load_conf or the new-app questions.
+# LOG_REDACT_QUERY BACKUP BACKUP_PATHS) are globals too, set by deploy_load_conf or the new-app questions.
 APP=''
 DEPLOY_TMP=''
 DEPLOY_UTC=''
@@ -200,7 +200,7 @@ app_name_free() {
     err "The name $1 is already used by another app."
     return 1
   fi
-  check_app_user "$1" && check_app_units "$1"
+  check_app_user "$1" && check_app_units "$1" && check_state_dir "$1"
 }
 
 # zero_config_check <release>: without deploy.conf, package.json must list next and the repo must have
@@ -593,15 +593,16 @@ ask_database() {
 
 # ---- B. Guards -----------------------------------------------------------------------------------
 
-# deploy_load_conf: reads the app config after the ownership check, and validates every value.
+# deploy_load_conf: reads the app config after the ownership check, and validates every value. BACKUP
+# is left as the app's backup mode (backup_mode), with its default applied.
 deploy_load_conf() {
   local conf=$SHIPIT_ETC/apps/$APP.conf var value ok=1
-  for var in REPO BRANCH DOMAIN PORT DATABASE HEALTH_FAIL LOG_REDACT_QUERY; do
+  for var in REPO BRANCH DOMAIN PORT DATABASE HEALTH_FAIL LOG_REDACT_QUERY BACKUP BACKUP_PATHS; do
     value=$(conf_get "$conf" "$var") || exit 1
     printf -v "$var" '%s' "$value"
   done
   HEALTH_FAIL=${HEALTH_FAIL:-report}
-  check_app_name "$APP" && check_app_user "$APP" && check_app_units "$APP" || exit 1
+  check_app_name "$APP" && check_app_user "$APP" && check_app_units "$APP" && check_state_dir "$APP" || exit 1
   check_repo "$REPO" || ok=''
   check_branch "$BRANCH" || ok=''
   check_domain "$DOMAIN" "$APP" || ok=''
@@ -615,6 +616,14 @@ deploy_load_conf() {
   esac
   [ -z "$LOG_REDACT_QUERY" ] || check_redact_query "$LOG_REDACT_QUERY" || ok=''
   [ -z "$DATABASE" ] || check_database "$DATABASE" "$APP" || ok=''
+  if [ -n "$BACKUP" ] && ! check_backup_mode "$BACKUP"; then
+    ok=''
+  elif [ "$BACKUP" = postgres ] && [ -z "$DATABASE" ]; then
+    err "BACKUP=postgres needs a DATABASE. Set DATABASE, or use BACKUP=state or BACKUP=none."
+    ok=''
+  fi
+  BACKUP=$(backup_mode "$BACKUP" "$DATABASE")
+  [ -z "$BACKUP_PATHS" ] || check_backup_paths "$BACKUP_PATHS" || ok=''
   [ -n "$ok" ] || die "Fix $conf, then re-run sudo shipit deploy $APP."
 }
 
@@ -876,20 +885,38 @@ deploy_units_and_site() {
   deploy_backups
 }
 
-# D7 (end): an app with a DATABASE gets its backup folder (postgres:postgres 700) and an enabled
-# shipit-backup@<app>.timer. Without one, a timer left enabled from before is disabled; its dumps stay.
+# D7 (end): backups follow BACKUP. postgres: the backup folder is postgres:postgres 700 and
+# shipit-backup@<app>.timer is enabled. state: the folder is root:root 700 (the state backup unit runs
+# as root; the app's user can't reach it) and shipit-state-backup@<app>.timer is enabled. A timer the
+# mode doesn't use is disabled if it was left enabled; the files already in the folder stay.
 deploy_backups() {
-  local timer=shipit-backup@$APP.timer
-  if [ -z "$DATABASE" ]; then
-    systemctl is-enabled --quiet "$timer" 2>/dev/null || return 0
-    systemctl disable --quiet --now "$timer" || die "Disabling $timer failed."
-    log "Disabled $timer, because $APP has no DATABASE now. Its dumps stay in $BACKUP_ROOT/$APP."
-    return 0
+  local unit on='' owner=root off=()
+  case $BACKUP in
+    postgres)
+      on=shipit-backup
+      owner=postgres
+      off=(shipit-state-backup)
+      ;;
+    state)
+      on=shipit-state-backup
+      off=(shipit-backup)
+      ;;
+    *) off=(shipit-backup shipit-state-backup) ;;
+  esac
+  for unit in "${off[@]}"; do
+    systemctl is-enabled --quiet "$unit@$APP.timer" 2>/dev/null || continue
+    systemctl disable --quiet --now "$unit@$APP.timer" || die "Disabling $unit@$APP.timer failed."
+    log "Disabled $unit@$APP.timer, because $APP has BACKUP=$BACKUP now. Its backups stay in $BACKUP_ROOT/$APP."
+  done
+  [ -n "$on" ] || return 0
+  install -d -m 700 -o "$owner" -g "$owner" "$BACKUP_ROOT/$APP" || die "Creating $BACKUP_ROOT/$APP failed."
+  systemctl is-enabled --quiet "$on@$APP.timer" 2>/dev/null && return 0
+  systemctl enable --quiet --now "$on@$APP.timer" || die "Enabling $on@$APP.timer failed."
+  if [ "$BACKUP" = postgres ]; then
+    log "Enabled $on@$APP.timer: daily backups of $DATABASE to $BACKUP_ROOT/$APP."
+  else
+    log "Enabled $on@$APP.timer: daily backups of $STATE_ROOT/$APP to $BACKUP_ROOT/$APP."
   fi
-  install -d -m 700 -o postgres -g postgres "$BACKUP_ROOT/$APP" || die "Creating $BACKUP_ROOT/$APP failed."
-  systemctl is-enabled --quiet "$timer" 2>/dev/null && return 0
-  systemctl enable --quiet --now "$timer" || die "Enabling $timer failed."
-  log "Enabled $timer: daily backups of $DATABASE to $BACKUP_ROOT/$APP."
 }
 
 # D8: point current, then previous, at their releases, each atomically.

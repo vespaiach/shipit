@@ -24,3 +24,5 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+StateDirectory=${APP}
+StateDirectoryMode=0750

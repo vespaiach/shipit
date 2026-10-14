@@ -72,15 +72,19 @@ status_release() {
   )
 }
 
+# status_backup: the last backup and how the last run of the mode's unit ended. BACKUP=none says so.
 status_backup() {
-  local last result
-  if [ -z "$DATABASE" ]; then
-    status_line backup "none: $APP has no database"
-    return 0
-  fi
-  last=$(backup_files "$APP" | tail -n 1)
-  result=$(systemctl show -p Result -p ExecMainExitTimestamp "shipit-backup@$APP.service" 2>/dev/null \
-    | backup_result)
+  local unit last result
+  case $BACKUP in
+    none)
+      status_line backup "none (BACKUP=none: $APP has no backups)"
+      return 0
+      ;;
+    state) unit=shipit-state-backup@$APP.service ;;
+    *) unit=shipit-backup@$APP.service ;;
+  esac
+  last=$(backup_files "$APP" "$(backup_ext "$BACKUP")" | tail -n 1)
+  result=$(systemctl show -p Result -p ExecMainExitTimestamp "$unit" 2>/dev/null | backup_result)
   status_line backup "${last:-none yet} (last run: $result)"
 }
 
@@ -89,11 +93,13 @@ status_app() {
   local conf=$SHIPIT_ETC/apps/$APP.conf opt=$SHIPIT_OPT/$APP current previous info p state code last
   log "$APP"
   if ! DOMAIN=$(conf_get "$conf" DOMAIN) || ! PORT=$(conf_get "$conf" PORT) \
-    || ! DATABASE=$(conf_get "$conf" DATABASE) || ! check_domain "$DOMAIN" "$APP" \
-    || ! check_port "$PORT" "$APP"; then
+    || ! DATABASE=$(conf_get "$conf" DATABASE) || ! BACKUP=$(conf_get "$conf" BACKUP) \
+    || ! check_domain "$DOMAIN" "$APP" || ! check_port "$PORT" "$APP" \
+    || ! { [ -z "$BACKUP" ] || check_backup_mode "$BACKUP"; }; then
     status_line config "$conf has a problem (see above). Fix it, then run sudo shipit deploy $APP"
     return 0
   fi
+  BACKUP=$(backup_mode "$BACKUP" "$DATABASE")
   status_line site "https://$DOMAIN (port $PORT)"
 
   current=$(readlink "$opt/current") || current=''

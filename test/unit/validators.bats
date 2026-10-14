@@ -395,3 +395,110 @@ x"; do
     }
   done
 }
+
+@test "conf_get: a key the file doesn't set is empty, not the caller's value" {
+  write_app_conf a REPO=x
+  BACKUP=state
+  [ -z "$(conf_get "$SHIPIT_ETC/apps/a.conf" BACKUP)" ]
+}
+
+@test "backup mode: postgres, state and none; nothing else" {
+  for mode in postgres state none; do
+    run check_backup_mode "$mode"
+    [ "$status" -eq 0 ]
+  done
+  for mode in '' Postgres pg sqlite 'state none' '$(id)'; do
+    run check_backup_mode "$mode"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $mode"
+      return 1
+    }
+  done
+  [ "$output" = "Invalid BACKUP '\$(id)': use postgres, state or none." ]
+}
+
+@test "backup mode: the default is postgres with a DATABASE and none without; a set BACKUP wins" {
+  [ "$(backup_mode '' app)" = postgres ]
+  [ "$(backup_mode '' '')" = none ]
+  [ "$(backup_mode state app)" = state ]
+  [ "$(backup_mode none app)" = none ]
+  [ "$(backup_ext postgres)" = dump ]
+  [ "$(backup_ext state)" = tar.gz ]
+  is_backup_name app app-20261013T030000Z.tar.gz tar.gz
+  run is_backup_name app app-20261013T030000Z.tar.gz
+  [ "$status" -eq 1 ]
+  run is_backup_name app app-20261013T030000Z.tarxgz tar.gz
+  [ "$status" -eq 1 ]
+}
+
+@test "BACKUP_PATHS: relative paths inside the state folder, separated by single spaces" {
+  for paths in backups 'backups photos' data/snapshots .config a_b-c.d 'x y z' snap..shots; do
+    run check_backup_paths "$paths"
+    [ "$status" -eq 0 ] || {
+      echo "refused $paths"
+      return 1
+    }
+  done
+}
+
+@test "BACKUP_PATHS: absolute, .., ., option-like, globbed or oddly spaced paths are refused" {
+  for paths in '' /etc ../x a/../b . a/. .. -x a/-x a/ a//b '*' 'a*' '$(id)' 'a;b' 'a  b' ' a' 'a ' 'a\b' "a
+b"; do
+    run check_backup_paths "$paths"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $paths"
+      return 1
+    }
+  done
+  run check_backup_paths 'backups ../etc'
+  [ "$output" = "Invalid BACKUP_PATHS entry '../etc': list paths inside the state folder, like backups photos (no leading /, and no . or .. parts)." ]
+}
+
+@test "EXTRA_PACKAGES: Debian package names separated by single spaces" {
+  for p in build-essential 'build-essential python3' libvips-dev g++ lib.foo+bar-1; do
+    run check_packages "$p"
+    [ "$status" -eq 0 ] || {
+      echo "refused $p"
+      return 1
+    }
+  done
+  for p in '' Build-Essential a -y 'a  b' 'a;rm' '$(id)' 'gcc*' 'python3:amd64' ' gcc' "gcc
+make"; do
+    run check_packages "$p"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $p"
+      return 1
+    }
+  done
+}
+
+@test "state dir: missing, or the app's own folder, is fine" {
+  stub id 'echo '"$(id -u)"
+  run check_state_dir app
+  [ "$status" -eq 0 ]
+  mkdir -p "$STATE_ROOT/app"
+  run check_state_dir app
+  [ "$status" -eq 0 ]
+}
+
+@test "state dir: someone else's folder, a file, a symlink or shipit's own folder is refused" {
+  mkdir -p "$STATE_ROOT/apt" "$BATS_TEST_TMPDIR/elsewhere"
+  stub id 'exit 1'
+  run check_state_dir apt
+  [ "$status" -eq 1 ]
+  [ "$output" = "$STATE_ROOT/apt already exists and isn't the apt app's own folder, so systemd would hand it to apt. Choose another app name." ]
+  stub id 'echo 99999'
+  run check_state_dir apt
+  [ "$status" -eq 1 ]
+  stub id 'echo '"$(id -u)"
+  : >"$STATE_ROOT/file"
+  run check_state_dir file
+  [ "$status" -eq 1 ]
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$STATE_ROOT/link"
+  run check_state_dir link
+  [ "$status" -eq 1 ]
+  # SHIPIT_VAR holds the locks: never an app's state folder, even when it's owned by that user.
+  STATE_ROOT=$BATS_TEST_TMPDIR
+  run check_state_dir var
+  [ "$status" -eq 1 ]
+}

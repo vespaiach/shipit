@@ -14,10 +14,11 @@ keep it, README.md and this file in step with the code.
 - `lib/<command>.sh` — one per command, defining `cmd_<command>`. `lib/deploy.sh` follows plan §3's
   A–D steps (`deploy_*`, called in order by `cmd_deploy`) and also holds the rollback steps
   (`switch_back`), because `HEALTH_FAIL=rollback` runs them. `rollback`, `status`, `logs` and `env`
-  source `lib/deploy.sh` to reuse its readers; `restore` sources `lib/backup.sh`. Logic lives in small
+  source `lib/deploy.sh` to reuse its readers; `restore` sources `lib/backup.sh` and `lib/deploy.sh`. Logic lives in small
   stdin/argument-driven helpers the tests call; the host-touching steps stay thin.
-- `libexec/` — what systemd runs: `run` (the process launcher) and `backup` (run as `postgres`). Each
-  runs its main function only when executed, so the tests source it.
+- `libexec/` — what systemd runs: `run` (the process launcher), `backup` (run as `postgres`) and
+  `state-backup` (root with only `CAP_SETUID`/`CAP_SETGID`; `tar` runs as the app's user). Each runs its
+  main function only when executed, so the tests source it.
 - `templates/` — what `render` fills in.
 - `install.sh` — copies `bin lib libexec templates` to `/usr/local/lib/shipit`, links
   `/usr/local/bin/shipit`.
@@ -33,9 +34,9 @@ keep it, README.md and this file in step with the code.
   `install.sh`, `libexec/*`), never in libraries.
 - **Libraries are side-effect free when sourced**: only constants and functions. Tests source them.
 - **Test seams are plain constants** in `common.sh` (`DEPLOY_USER`, `SHIPIT_ETC`, `SHIPIT_VAR`,
-  `SHIPIT_OPT`, `SHIPIT_OWNER_UID`, `BACKUP_ROOT`). Never read them from the environment or add flags
-  for them; tests reassign them after sourcing. Lock helpers take the lock path. Tests stub `getent`,
-  `ss`, `systemctl`, `id` and `runuser` through `PATH`, so call commands by name (no absolute paths,
+  `SHIPIT_OPT`, `SHIPIT_OWNER_UID`, `BACKUP_ROOT`, `STATE_ROOT`). Never read them from the environment or
+  add flags for them; tests reassign them after sourcing. Lock helpers take the lock path. Tests stub
+  `getent`, `ss`, `systemctl`, `id`, `runuser` and `setpriv` through `PATH`, so call commands by name (no absolute paths,
   no `$EUID`).
 - **Validators** are `check_<thing> <value> [app]`: silent on success, print the reason to stderr and
   return 1 on failure. Validate every value read from a config or typed by a person before using it.
@@ -43,6 +44,8 @@ keep it, README.md and this file in step with the code.
   strict patterns, `jq`, `git show` as `$DEPLOY_USER`), and release files through `release_cat`. Repo
   commands run through `as_deployer`; secrets reach the build on stdin, never on a command line. Root
   sources only files under `$SHIPIT_ETC`, and only after `check_sourced_file` (or via `conf_get`).
+  Root never reads or writes inside an app's state folder (`/var/lib/<app>`): that goes through
+  `as_app`, as the app's user.
 - **SQL** is built by `sql_*` functions, with names quoted by `sql_ident`/`sql_literal`, and piped to
   `pg_psql`.
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
@@ -69,7 +72,7 @@ keep it, README.md and this file in step with the code.
 
 ## Making a change
 
-Milestones S0–S7 (plan §8) are implemented; S5.5 and S7.5 are by-hand Tracklite steps (plan §6) and
+Milestones S0–S8 (plan §8) are implemented; S5.5 and S7.5 are by-hand Tracklite steps (plan §6) and
 aren't done.
 
 1. Branch from `origin/main`.

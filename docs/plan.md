@@ -16,6 +16,10 @@ It generalises Tracklite's `ops/` folder (`reference/tracklite-ops/`) and keeps 
 - systemd hardening;
 - daily `pg_dump` backups.
 
+It also runs apps that keep their state on local disk instead (a SQLite file, uploads, snapshots): each
+app gets a state folder that outlives its releases, and backups can archive it (section 2, "The state
+folder").
+
 ## Scope
 
 | Constraint | Consequence |
@@ -25,7 +29,7 @@ It generalises Tracklite's `ops/` folder (`reference/tracklite-ops/`) and keeps 
 | Apps come from GitHub, public or private | Public repos are fetched over HTTPS without credentials. Private repos use one read-only deploy key per app. |
 | Node.js LTS, Next.js latest | One system Node: the LTS major version current when `setup` first runs, recorded in `host.conf`. Zero-config deploys assume Next.js. |
 | PostgreSQL 18 | Comes from PGDG. One shared cluster, with one role and one database per app. |
-| Backups: a local dump folder named by date and time, with no remote copy and no email | `/var/backups/shipit/<app>/<app>-<UTC>.dump`. No R2, no `age`, no `rclone`, no alert unit. |
+| Backups: a local folder of files named by date and time, with no remote copy and no email | `/var/backups/shipit/<app>/<app>-<UTC>.dump` (PostgreSQL) or `<app>-<UTC>.tar.gz` (state folder). No R2, no `age`, no `rclone`, no alert unit. |
 | Logs: files on the VPS, with no remote copy | `/var/log/shipit/<app>/`, rotated by logrotate and kept 14 days |
 
 ## Decisions
@@ -42,6 +46,7 @@ It generalises Tracklite's `ops/` folder (`reference/tracklite-ops/`) and keeps 
 | 8 | Private repos | **Deploy key, then wait.** `deploy` prints the public key and the GitHub URL to paste it into, then retries `git ls-remote` every 5 seconds until GitHub accepts it. The tool is never given a GitHub token. |
 | 9 | SSH hardening | **On**, in `setup`, but only when the current session was a key login (section 3). Password logins are turned off for everyone. If the admin is `root`, root may still log in, but only with a key (`PermitRootLogin prohibit-password`). If the admin is a named user, root login is turned off (`PermitRootLogin no`) and the admin uses `sudo` without a password. |
 | 10 | Root never runs or sources repo content | Root reads repo files only as data, with strict `grep -E` patterns, `jq`, or `git show` run as `deployer`. `deploy.conf` is sourced only by `deployer` (during a build) and by the app user (in the launcher). |
+| 11 | Apps that keep state on disk | **A systemd `StateDirectory=` per app**, `/var/lib/<app>`, owned by the app's user, kept across restarts, deploys and rollbacks. The app's env file points the app at it. `BACKUP=state` archives it (section 2). Nothing app-specific: no `DATA_DIR` or other variable is added by shipit. |
 
 ## Fixes to bugs in today's `ops/`, carried into shipit
 
@@ -77,14 +82,16 @@ shipit/
 │   └── restore.sh
 ├── libexec/                     run by systemd, never by people
 │   ├── run                      process launcher
-│   └── backup                   pg_dump to /var/backups/shipit/<app>, then prune
+│   ├── backup                   pg_dump to /var/backups/shipit/<app>, then prune
+│   └── state-backup             tar of /var/lib/<app> (as the app's user) to /var/backups/shipit/<app>, then prune
 ├── templates/
 │   ├── Caddyfile                root: global options plus `import /etc/caddy/sites/*.caddy`
 │   ├── site.caddy
 │   ├── app@.service
 │   ├── app.target
 │   ├── shipit-backup@.service
-│   ├── shipit-backup@.timer
+│   ├── shipit-backup@.timer       also installed as shipit-state-backup@.timer
+│   ├── shipit-state-backup@.service
 │   ├── nftables.conf
 │   ├── sshd.conf                drop-in: no passwords; root key-only or off
 │   ├── sudoers                  password-less sudo for a named admin
@@ -101,6 +108,7 @@ shipit/
     ├── golden/                  expected rendered units, site file, nftables, sshd drop-in
     ├── fixtures/next-app/       the smallest real Next.js app (zero-config path)
     ├── fixtures/node-app/       tiny Node HTTP server + worker + SQL migration, with deploy.conf; a flag makes the migration fail
+    ├── fixtures/state-app/      tiny Node HTTP server that keeps notes in DATA_DIR (its state folder), with deploy.conf
     └── e2e/run.sh               full scenarios inside an Incus VM (section 7)
 ```
 
@@ -169,21 +177,64 @@ PORT=3001
 DATABASE=tracklite          # optional; empty means no database
 HEALTH_FAIL=report          # report (default) | rollback
 LOG_REDACT_QUERY="token"    # optional; query parameters removed from the access log
+BACKUP=postgres             # optional; postgres | state | none (see "The state folder")
+BACKUP_PATHS="backups photos"  # optional; with BACKUP=state, paths in /var/lib/<app>; empty means all of it
 ```
+
+`BACKUP` defaults to `postgres` when `DATABASE` is set and to `none` otherwise, so a config written before
+`BACKUP` existed behaves as it did. `BACKUP=postgres` with `DATABASE` empty is refused. An app backs up
+one thing: with `BACKUP=state`, a `DATABASE` it also has isn't backed up.
 
 ### `/etc/<app>/env` (`root:root`, 600)
 
 The app's secrets. `deploy` creates it with `DATABASE_URL` and `APP_URL` plus your answers to the `.env.example` prompts, and only ever adds keys afterwards. systemd reads it for the app. During a deploy, root reads it and passes it to the `deployer` build, so `deployer` can't read any app's env file at rest. Edit it with `sudo shipit env <app>`.
 
+### The state folder: `/var/lib/<app>` (`<app>:<app>`, 750)
+
+`<app>@.service` sets `StateDirectory=<app>` and `StateDirectoryMode=0750`. systemd creates the folder
+when the app first starts, owned by the app's user, and keeps it across restarts, deploys and rollbacks;
+it also passes its path to the app as `$STATE_DIRECTORY`. Nothing in shipit removes it: pruning and
+rollback only touch `/opt/<app>`. The app's own env file says where its data goes, under whatever name
+the app reads, for example (Glance):
+
+```bash
+DATA_DIR=/var/lib/glance
+```
+
+If the app's `.env.example` lists the key, the first deploy asks for it; otherwise add it with
+`sudo shipit env <app>`. Only the app's processes can write there: the build and `MIGRATE` run as
+`deployer`, which can't open the folder, so an app keeping state there migrates it when it starts, and
+must not open it during `BUILD`.
+
+**Backups.** With `BACKUP=state`, `shipit-state-backup@<app>.timer` archives `BACKUP_PATHS` (paths
+inside the folder, separated by spaces; all of it when empty) daily to
+`/var/backups/shipit/<app>/<app>-<UTC>.tar.gz`, keeping `BACKUP_KEEP` files, like the PostgreSQL dumps.
+gzip is used because it's always installed. A path that isn't there yet is skipped; one that leads
+outside the folder (a symlink, at any level) fails the backup.
+
+**Live databases.** Copying a live SQLite database in WAL mode, or any file the app is writing, isn't a
+safe backup. Have the app write consistent snapshots itself (for SQLite, `VACUUM INTO` a temp file,
+then rename it) before 03:00 UTC, and list those in `BACKUP_PATHS`. For Glance, which writes nightly
+snapshots to `$DATA_DIR/backups/`: `BACKUP_PATHS="backups photos"`. Restoring then puts the snapshots
+back; loading one into the live database is up to the app or you.
+
 ### `/etc/shipit/host.conf` (`root:root`, 644, no secrets)
 
-`setup` writes it on its first run: `ACME_EMAIL`, `ADMIN_USER` (default `root`), `NODE_MAJOR`, `SWAP_SIZE`, `BACKUP_KEEP=14`, `LOG_KEEP_DAYS=14` and `MIN_FREE_DISK_GB=3`. Later runs read it and never rewrite it.
+`setup` writes it on its first run: `ACME_EMAIL`, `ADMIN_USER` (default `root`), `NODE_MAJOR`, `SWAP_SIZE`, `BACKUP_KEEP=14`, `LOG_KEEP_DAYS=14`, `MIN_FREE_DISK_GB=3` and a blank `EXTRA_PACKAGES=`. Later runs read it and never rewrite it; a file written before `EXTRA_PACKAGES` existed reads as blank.
+
+`EXTRA_PACKAGES` lists Debian packages `setup` installs too, separated by spaces and quoted
+(`EXTRA_PACKAGES="build-essential python3"`). Set that when `npm ci` fails while compiling a native
+module (better-sqlite3, sharp) because no prebuilt binary matches the host, then re-run `setup` and
+redeploy. Removing a name doesn't uninstall the package.
 
 ### Validation (in `common.sh`, used by every command)
 
 | Value | Rule | Why |
 |---|---|---|
-| app name | `^[a-z][a-z0-9_]{0,30}$`. Not an existing system user unless that user's GECOS field is `shipit app`. Not an existing `<app>@.service` or `<app>.target` unit file unless it's marked `# managed by shipit` (checked in `deploy`, because it needs systemd). | The name becomes a Linux user, a systemd unit and a Postgres name. A dot in the name would put a dot in unit and file names. An unmarked unit check stops an app called `postgresql`, `user` or `getty` from writing `/etc/systemd/system/<name>@.service`, which would override Debian's own template. |
+| app name | `^[a-z][a-z0-9_]{0,30}$`. Not an existing system user unless that user's GECOS field is `shipit app`. Not an existing `<app>@.service` or `<app>.target` unit file unless it's marked `# managed by shipit` (checked in `deploy`, because it needs systemd). Not a name whose `/var/lib/<app>` already exists, unless it's a folder owned by the app's user, and never `shipit` (`/var/lib/shipit` holds the locks). | The name becomes a Linux user, a systemd unit and a Postgres name. A dot in the name would put a dot in unit and file names. An unmarked unit check stops an app called `postgresql`, `user` or `getty` from writing `/etc/systemd/system/<name>@.service`, which would override Debian's own template. |
+| `BACKUP` | `postgres`, `state` or `none`, or empty for the default. `postgres` needs a `DATABASE`. | It picks a unit and a folder owner. |
+| `BACKUP_PATHS` | Relative paths separated by single spaces. Each part is `[A-Za-z0-9_.][A-Za-z0-9_.-]*` and not `.` or `..`. When the backup runs, each must resolve (`realpath -e`, as the app's user) inside `/var/lib/<app>`. | It's passed to `tar` and `rm -rf` (as the app's user). A leading `-` would be an option; `..` or a symlink would leave the folder. |
+| `EXTRA_PACKAGES` | Debian package names (`[a-z0-9][a-z0-9+.-]+`) separated by single spaces | It's passed to `apt-get install`. |
 | process name | `^[a-z][a-z0-9_]*$` | It becomes a systemd instance name and a shell variable name. |
 | `DOMAIN` | A lowercase hostname with at least one dot. Each label is 1–63 characters of `[a-z0-9-]` and doesn't start or end with `-`. No trailing dot, no wildcard. Unique across all app configs (another app using it is refused; the same app is fine). | It's written into a Caddyfile. |
 | `PORT` | `^[1-9][0-9]*$`, from 1024 to 65535, and unique across all app configs except the app's own. **When an app gets a new port** (a first deploy, or an edited config), also check that it's not listening (`ss -ltnH`). The listening check is skipped when the app's installed `<app>@.service` already sets that same `PORT`, because a running app is always listening on its own port. | Two apps on one port is the main multi-app failure. Without the own-port exception, every redeploy would refuse. |
@@ -192,7 +243,7 @@ The app's secrets. `deploy` creates it with `DATABASE_URL` and `APP_URL` plus yo
 | env value | No newline, no quote or backslash, no leading or trailing whitespace | systemd and the build read the file literally, so these characters would mean different things to them. |
 | any file the tool sources from `/etc/shipit` | Owned by root and not writable by group or others | Root sources these files. A writable one would run someone else's code as root. |
 
-**Test seams.** `common.sh` sets plain constants (`DEPLOY_USER=deployer`, `SHIPIT_ETC=/etc/shipit`, `SHIPIT_VAR=/var/lib/shipit`, `SHIPIT_OPT=/opt`, `BACKUP_ROOT=/var/backups/shipit`). Unit tests source `common.sh` and reassign them. They aren't read from the environment and there are no flags for them. The lock helpers take the lock file's path as an argument. Tests stub `getent`, `ss` and `systemctl` through `PATH`.
+**Test seams.** `common.sh` sets plain constants (`DEPLOY_USER=deployer`, `SHIPIT_ETC=/etc/shipit`, `SHIPIT_VAR=/var/lib/shipit`, `SHIPIT_OPT=/opt`, `BACKUP_ROOT=/var/backups/shipit`, `STATE_ROOT=/var/lib`). Unit tests source `common.sh` and reassign them. They aren't read from the environment and there are no flags for them. The lock helpers take the lock file's path as an argument. Tests stub `getent`, `ss`, `systemctl`, `id`, `runuser` and `setpriv` through `PATH`.
 
 ## 3. Commands
 
@@ -204,15 +255,15 @@ Every command except `help` must run as root, and refuses with `Run this as root
 |---|---|---|
 | 1. Guards | Requires Debian 13 and root. | Stops before changing anything. |
 | 2. Host config | If `host.conf` is missing, asks for the ACME email, picks the Node LTS major version and the swap size, and writes the file. | |
-| 3. Packages | PostgreSQL 18 (PGDG), Caddy (Cloudsmith), Node `$NODE_MAJOR` (NodeSource), `git`, `curl`, `jq`, `gettext-base`, `nftables` and `unattended-upgrades` (security updates only, Debian's default). | Stops at the first failing step. A re-run continues. |
+| 3. Packages | PostgreSQL 18 (PGDG), Caddy (Cloudsmith), Node `$NODE_MAJOR` (NodeSource), `git`, `curl`, `jq`, `gettext-base`, `nftables` and `unattended-upgrades` (security updates only, Debian's default), then `EXTRA_PACKAGES`. Only missing packages are installed, so a re-run changes nothing. | Stops at the first failing step. A re-run continues. |
 | 4. Swap | Creates `/swapfile` of `SWAP_SIZE` if there's no swap. | |
 | 5. Users | **`deployer`**: `useradd --system --create-home --home-dir /home/deployer --shell /usr/sbin/nologin`. **The admin**: nothing to do if `ADMIN_USER` is `root`. For a named user that doesn't exist yet, it creates the user with a locked password (`useradd --create-home --shell /bin/bash`, so key login only), copies root's `~/.ssh/authorized_keys` to it, and installs `/etc/sudoers.d/shipit-admin` (rendered, `visudo -cf`, then `install -m 440`). | |
 | 6. GitHub host keys | Writes GitHub's published SSH host keys (from `https://api.github.com/meta`) into `/etc/ssh/ssh_known_hosts`, so the first fetch doesn't trust on first use. | |
 | 7. Firewall | Renders `/etc/nftables.conf` (drop inbound except established, loopback, ICMP, the SSH port read from `sshd -T`, 80 and 443 over TCP and 443 over UDP). Validates it with `nft -c -f`, installs it, and enables and reloads `nftables`. **Only if the file is missing, marked `# managed by shipit`, or still Debian's unmodified packaged default** (its md5 matches the package's conffile entry). Otherwise it leaves the file alone and says so. | The current SSH session survives, because established connections are accepted first. |
 | 8. SSH hardening | Only if **both** of these hold: the admin has a non-empty `authorized_keys`, and this session logged in with a key (the journal line `sshd-session[<pid>]: Accepted publickey for …`, where `<pid>` is one of this process's ancestors; `SSH_CLIENT` isn't used because `sudo` drops it). Then it writes `/etc/ssh/sshd_config.d/10-shipit.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, and `PermitRootLogin prohibit-password` when the admin is `root` or `no` otherwise), runs `sshd -t` and reloads `ssh`. The `10-` prefix wins over Hostinger's `50-cloud-init.conf`, because sshd uses the first value it reads. | If a condition fails, it skips this step and says which one. It ends with: `Open a NEW terminal and log in as <admin> before closing this one. If that fails, use Hostinger's browser terminal and delete /etc/ssh/sshd_config.d/10-shipit.conf.` |
 | 9. Caddy | Writes `/etc/caddy/Caddyfile` **only if it's missing, marked `# managed by shipit`, or the caddy package's unmodified default**, creates `/etc/caddy/sites/`, validates, and reloads. | If it finds a Caddyfile it didn't write, it writes `/etc/caddy/Caddyfile.shipit` instead and says how to switch (section 6). |
-| 10. Folders | `/var/lib/shipit/` (root, holds the locks), `/var/log/shipit/` (`root:adm` 751, so `caddy`, which isn't in `adm`, can reach each `access.log` but nobody can list the folder), `/var/backups/shipit/` (root 711, so `postgres` can reach its own `<app>/` folder but can't list the others) | |
-| 11. Rotation and backups | `/etc/logrotate.d/shipit` (daily, `LOG_KEEP_DAYS`, `copytruncate`, `compress`) and the `shipit-backup@.{service,timer}` templates | |
+| 10. Folders | `/var/lib/shipit/` (root, holds the locks), `/var/log/shipit/` (`root:adm` 751, so `caddy`, which isn't in `adm`, can reach each `access.log` but nobody can list the folder), `/var/backups/shipit/` (root 711, so `postgres` and the state backup unit can reach an app's own `<app>/` folder but nobody can list the others) | |
+| 11. Rotation and backups | `/etc/logrotate.d/shipit` (daily, `LOG_KEEP_DAYS`, `copytruncate`, `compress`), the `shipit-backup@.{service,timer}` templates, and `shipit-state-backup@.service` with the same timer template installed as `shipit-state-backup@.timer` | |
 
 Output: a summary of what changed, a warning if RAM plus swap is below 4 GB, and the next step, `sudo shipit deploy https://github.com/<you>/<app>`.
 
@@ -228,7 +279,7 @@ Output: a summary of what changed, a warning if RAM plus swap is below 4 GB, and
 
 | Step | What it does |
 |---|---|
-| Runtime user | `useradd --system --shell /usr/sbin/nologin --comment 'shipit app' <app>`. Refuses if the user exists without that marker. |
+| Runtime user | `useradd --system --shell /usr/sbin/nologin --comment 'shipit app' <app>`. Refuses if the user exists without that marker, or if `/var/lib/<app>` exists and isn't that user's folder (systemd would hand it to the app, recursively). |
 | Folders | `/opt/<app>` is `deployer:<app>` with mode **750**, so other apps' users can't read it. `releases/` and `repo/` inside it belong to `deployer`. `/var/log/shipit/<app>/` is `root:adm` 751 (for `caddy`, as above), and `access.log` there is pre-created as `caddy:adm` 640. Step D7 pre-creates each process's `<process>.log` and `<process>.error.log` as `root:adm` 640 before systemd first opens them, so they're never world-readable. |
 | Repo access | Private repos only. Creates `~deployer/.ssh/shipit_<app>` (ed25519) if it's missing. If `git ls-remote` fails, it prints the public key and `https://github.com/<owner>/<repo>/settings/keys/new` ("Allow write access" left unticked), then retries every 5 seconds until it works. Ctrl-C stops it, and the next deploy picks up from there. Fetches use `GIT_SSH_COMMAND="ssh -i … -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null"`, so only the host keys in `/etc/ssh/ssh_known_hosts` are trusted. |
 | Database | Only if `DATABASE` is set. Creates the role with a random password and the database owned by it, then runs `revoke connect … from public` and `grant connect … to <role>`. If the role exists but `/etc/<app>/env` doesn't, the password can't be recovered, so it refuses and prints the `alter role … password` fix. |
@@ -241,10 +292,10 @@ Output: a summary of what changed, a warning if RAM plus swap is below 4 GB, and
 4. **Env file.** Read the key names from the release's `.env.example` (`grep -E '^[A-Z_][A-Z0-9_]*='`; comments, indented and `export` lines are ignored, and example values are never used). Ask for any key that `/etc/<app>/env` doesn't have, except `PORT` and `NODE_ENV` (the unit sets them, and the env file would override it), then write the file (render to a temp file, then `install -m 600`).
 5. **Build**, holding the shared build lock: `flock /var/lib/shipit/build.lock`. If it has to wait, it prints `Waiting for another app's build…`. Runs `INSTALL` then `BUILD` as `deployer`, with the env file and `PORT` exported. The build log records when the lock was taken and released.
 6. **Migrate**, if there's a `MIGRATE` command. On failure, print `Migrations failed, so nothing was switched. Still serving <old>.`, delete the release, and exit 1.
-7. **Units and site.** Render `<app>@.service`, `<app>.target` (whose `Wants=` lists the release's processes) and `sites/<app>.caddy` to temp files. Create an empty `sites/<app>.extra` if it's missing (it's never overwritten). Validate with `systemd-analyze verify` and `caddy validate`, with the new site in place. Install only the files that changed, then run `daemon-reload` and `enable <app>.target`. Reload Caddy if the site changed and the root Caddyfile is shipit's. If `DATABASE` is set, create `/var/backups/shipit/<app>/` (`postgres:postgres` 700) and enable and start `shipit-backup@<app>.timer`; if it's empty, disable a timer left enabled from before (its dumps are kept). If any validation fails, the old files stay, the release is deleted, and the command exits 1.
+7. **Units and site.** Render `<app>@.service`, `<app>.target` (whose `Wants=` lists the release's processes) and `sites/<app>.caddy` to temp files. Create an empty `sites/<app>.extra` if it's missing (it's never overwritten). Validate with `systemd-analyze verify` and `caddy validate`, with the new site in place. Install only the files that changed, then run `daemon-reload` and `enable <app>.target`. Reload Caddy if the site changed and the root Caddyfile is shipit's. Then backups, by `BACKUP`: `postgres` creates `/var/backups/shipit/<app>/` (`postgres:postgres` 700) and enables and starts `shipit-backup@<app>.timer`; `state` makes that folder `root:root` 700 and enables `shipit-state-backup@<app>.timer`. A timer the mode doesn't use (both, with `none`) is disabled if it was left enabled; the files already in the folder are kept. If any validation fails, the old files stay, the release is deleted, and the command exits 1.
 8. **Switch.** Point `current` and then `previous` at their releases, each atomically with `mv -T`.
 9. **Restart** `<app>.target`. `PartOf=` passes the restart on to every process. Instances the release no longer lists are stopped.
-10. **Prune** every release except `current` and `previous`.
+10. **Prune** every release except `current` and `previous`. Only `/opt/<app>/releases/` is pruned; the state folder is never touched.
 11. **Check health.** Poll `http://127.0.0.1:$PORT$HEALTH_PATH` with `Host: $DOMAIN` for up to 60 seconds. With `HEALTH_PATH` set, require `200`. Without it, poll `/` and require a status below 500.
     - On success, print `Deployed <sha>. https://<domain>` and exit 0.
     - On failure with `HEALTH_FAIL=report`, print `Deployed <sha>, but <path> answered <code>. Switch back with: sudo shipit rollback <app>` and exit 1.
@@ -263,11 +314,11 @@ Takes the app lock. Refuses with `No previous release to roll back to.` if `prev
 3. restarts `<app>.target`, which stops the instances that release doesn't list;
 4. runs the health check and reports the result.
 
-It doesn't roll forward or touch the database. Because the launcher reads `current/deploy.conf`, the previous release's commands come back automatically.
+It doesn't roll forward or touch the database or the state folder: whatever the newer release wrote to `/var/lib/<app>` (a migrated SQLite file, say) stays. Because the launcher reads `current/deploy.conf`, the previous release's commands come back automatically.
 
 ### `shipit status [app]`
 
-For each app, or the one named: the `current` and `previous` releases (time and sha), `systemctl is-active` for each instance, the health check's status code, the last line of `deploy.log`, and the last backup's file name and result. It also runs `caddy validate` once and reports the result. It's read-only. It takes no lock. The instances are the current release's processes (read like deploy reads them), and anything but `active` is shown in capitals. The backup result is how the last `shipit-backup@<app>.service` run ended (`systemctl show -p Result -p ExecMainExitTimestamp`: success, failed, or never run). It ends by saying where the backups are (R9).
+For each app, or the one named: the `current` and `previous` releases (time and sha), `systemctl is-active` for each instance, the health check's status code, the last line of `deploy.log`, and the last backup's file name and result. It also runs `caddy validate` once and reports the result. It's read-only. It takes no lock. The instances are the current release's processes (read like deploy reads them), and anything but `active` is shown in capitals. The backup result is how the last run of the mode's unit ended (`shipit-backup@<app>.service` or `shipit-state-backup@<app>.service`; `systemctl show -p Result -p ExecMainExitTimestamp`: success, failed, or never run). With `BACKUP=none` it says `none (BACKUP=none: <app> has no backups)`. It ends by saying where the backups are (R9).
 
 ### `shipit logs <app> [process | access | deploy]`
 
@@ -279,11 +330,13 @@ Takes the app lock, so it can't race a deploy or rollback. Opens a private copy 
 
 ### `shipit backup <app>`
 
-Runs `systemctl start shipit-backup@<app>.service`, then prints the new file's name and size. It refuses an app without a `DATABASE`, or one whose backup folder no deploy has made yet. It lives in `lib/backup.sh`, like every other command, because `restore` reuses it.
+Runs the mode's unit (`systemctl start shipit-backup@<app>.service`, or `shipit-state-backup@<app>.service` with `BACKUP=state`), then prints the new file's name and size. With `BACKUP=none` it exits 1 with one line naming the setting: `<app> has no backups, because <conf> sets BACKUP=none.`, or, when that's only the default, `<app> has no backups: BACKUP is none by default, because DATABASE is empty in <conf>. Set BACKUP=state in <conf> to back up /var/lib/<app>.` It also refuses an app whose backup folder no deploy has made yet. It lives in `lib/backup.sh`, like every other command, because `restore` reuses it.
 
 ### `shipit restore <app> [file | latest]`
 
 Asks you to type the app name to confirm, so it refuses to run without a terminal. The file must be one of the app's dump names (`<app>-<YYYYmmddTHHMMSSZ>.dump`, no path) in `/var/backups/shipit/<app>/`; `latest` (the default) is the newest, chosen before the fresh backup. Holding the app lock, it takes a fresh backup first, stops `<app>.target`, runs `pg_restore --clean --if-exists --no-owner --role=<app> --single-transaction --dbname <db>` as `postgres` from the chosen file, and starts the target again, also when the restore fails. `--single-transaction` means a failed restore leaves the database as it was.
+
+With `BACKUP=state`, the file is one of the app's archives (`<app>-<YYYYmmddTHHMMSSZ>.tar.gz`), and it says what it replaces (`BACKUP_PATHS`, or everything) before asking. Holding the app lock, it takes a fresh backup, stops `<app>.target`, and then, as the app's user (`setpriv`), removes `BACKUP_PATHS` (or everything in the folder) from `/var/lib/<app>` and extracts the archive there, so neither step can reach a file the app couldn't. Files outside `BACKUP_PATHS` are left as they are. It starts the target and runs the health check, failing with the fresh backup's name if it isn't healthy. An extract can't be undone halfway like a transaction, so when it fails the app is left stopped, and it says how to put the fresh backup back or start the app as it is. `BACKUP=none` is refused as for `backup`.
 
 ### `libexec/run <app> <process>` — the launcher, run by systemd as `<app>`
 
@@ -292,6 +345,10 @@ Asks you to type the app name to confirm, so it refuses to run without a termina
 3. Sources `/opt/<app>/current/deploy.conf` if it exists. Otherwise it uses the zero-config `PROCESS_web`.
 4. If `PROCESS_<process>` is unset, prints `<process> isn't defined in this release` and **exits 78**. `RestartPreventExitStatus=78` stops systemd restarting it in a loop.
 5. Otherwise runs `exec bash -c "exec $cmd"`. Both `exec`s matter: they make the app the unit's main process, so `SIGTERM` reaches it directly. Tracklite's worker relies on that to finish its batch before stopping.
+
+### `libexec/state-backup <app>` — run by `shipit-state-backup@<app>.service` as root with two capabilities
+
+Reads `BACKUP` (which must be `state`) and `BACKUP_PATHS` from the app config (`conf_get`, after the ownership check; the unit runs as root) and `BACKUP_KEEP` from `host.conf`. It runs `tar -czf -` as the app's user with `setpriv --reuid=<app> --regid=<app> --clear-groups`, in `/var/lib/<app>`, after checking each path resolves inside the folder, and writes the output to a temp file in `/var/backups/shipit/<app>/`. Reading as the app's user means a symlink the app plants reaches nothing the app can't already read; root only writes the result where the app can't reach it. On success it renames the file to `<app>-<YYYYmmddTHHMMSSZ>.tar.gz` and deletes all but the newest `BACKUP_KEEP` archives (dumps in the same folder are left alone).
 
 ### `libexec/backup <app>` — run by `shipit-backup@<app>.service` as `postgres`
 
@@ -346,7 +403,14 @@ tracklite.example.com {
 }
 ```
 
-The `delete` lines come from `LOG_REDACT_QUERY`. With nothing to redact, the `format filter` block is left out. Rotation is done by logrotate (`copytruncate`), not Caddy, so every log file under `/var/log/shipit` is kept for the same time. Tracklite's `tracklite.extra` holds `header Referrer-Policy "same-origin"`. The root file imports `*.caddy` only, so `.extra` files are never loaded as sites of their own.
+The `delete` lines come from `LOG_REDACT_QUERY`. With nothing to redact, the `format filter` block is left out.
+
+**Server-sent events** pass through `encode` one by one, so the site needs nothing for them. Caddy's
+`reverse_proxy` flushes every write of a `text/event-stream` response at once (`flushInterval()` returns
+`-1` for it), and `encode` sends those responses' headers at once and flushes its compressor on every
+flush (`FlushError`). Checked against Caddy 2.11.7's source, and by a fixture sending one event per
+second through this site block: with zstd, gzip and no encoding, each event arrived about a second after
+the last. The events are still compressed. Rotation is done by logrotate (`copytruncate`), not Caddy, so every log file under `/var/log/shipit` is kept for the same time. Tracklite's `tracklite.extra` holds `header Referrer-Policy "same-origin"`. The root file imports `*.caddy` only, so `.extra` files are never loaded as sites of their own.
 
 **`/etc/systemd/system/tracklite@.service`**:
 
@@ -377,9 +441,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+StateDirectory=tracklite
+StateDirectoryMode=0750
 ```
 
-systemd opens the log files as root before it drops to the app user, so the app user never needs write access to `/var/log`.
+systemd opens the log files as root before it drops to the app user, so the app user never needs write access to `/var/log`. `StateDirectory=` works with the hardening above: `ProtectSystem=full` leaves `/var` writable, and systemd creates `/var/lib/<app>` (owned by the app, 750) before the process starts, so an app already deployed gets it on its next deploy, whose restart applies the changed unit.
 
 **`/etc/systemd/system/tracklite.target`**:
 
@@ -426,7 +492,29 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-`/var/backups/shipit/<app>/` is `postgres:postgres` with mode 700.
+**`shipit-state-backup@.service`** (written by `setup`; `shipit-backup@.timer` is installed again as `shipit-state-backup@.timer`):
+
+```ini
+# managed by shipit
+[Unit]
+Description=State folder backup of %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/shipit/host.conf
+ExecStart=/usr/local/lib/shipit/libexec/state-backup %i
+# Root only to switch to the app's user for tar, and to own the archives the app can't reach.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+# Everything is read-only (the state folder included) except the app's backup folder.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/shipit/%i
+```
+
+`/var/backups/shipit/<app>/` is `postgres:postgres` with mode 700 for `BACKUP=postgres`, and `root:root` 700 for `BACKUP=state`.
 
 **`/etc/nftables.conf`**:
 
@@ -491,8 +579,9 @@ ops ALL=(ALL:ALL) NOPASSWD: ALL
 | admin (yours): `root` by default | SSH, key only | Everything. Runs every shipit command, as root or through password-less `sudo`. | Log in with a password |
 | root, when a named admin is used | no (after `setup`) | Runs shipit through `sudo` | Log in over SSH |
 | `deployer` (shared) | no | Write every app's `/opt/<app>`. Run builds and migrations, with each app's env passed in by root for that build only. | Read any `/etc/<app>/env` at rest, use `sudo`, edit `/etc`, units or the tool, or connect to Postgres as a superuser |
-| `<app>` (one per app) | no | Read its own `/opt/<app>` (group `<app>`, mode 750). Connect to its own database. Receive its env vars from systemd. | Read other apps' code, connect to other apps' databases (`revoke connect … from public`), read its env file, write its own code, or write its log files directly (systemd holds them open) |
-| `postgres` | no | Run PostgreSQL and the backups. Write `/var/backups/shipit/*`. | — |
+| `<app>` (one per app) | no | Read its own `/opt/<app>` (group `<app>`, mode 750). Read and write its own state folder, `/var/lib/<app>` (750). Connect to its own database. Receive its env vars from systemd. | Read other apps' code or state folders, connect to other apps' databases (`revoke connect … from public`), read its env file, write its own code, write its log files directly (systemd holds them open), or reach any backups, its own included |
+| `postgres` | no | Run PostgreSQL and the `BACKUP=postgres` backups. Write the `postgres`-owned `/var/backups/shipit/<app>/` folders. | — |
+| `shipit-state-backup@<app>` (root, `CAP_SETUID` and `CAP_SETGID` only) | no | Read `/var/lib/<app>` as `<app>` (`setpriv`), write `/var/backups/shipit/<app>/` (`root:root` 700) | Write anything else (`ProtectSystem=strict`), use the network, or gain privileges |
 | `caddy` | no | Bind 80 and 443, read `/etc/caddy`, write each `access.log` | — |
 
 **Trust boundaries:**
@@ -500,6 +589,7 @@ ops ALL=(ALL:ALL) NOPASSWD: ALL
 - **Anyone who can push to an app's deployed branch runs code as `deployer`** (npm lifecycle scripts, `BUILD`, `MIGRATE`). `deployer` owns every app's code, so **push access to any app's repo can change every app's code on the next restart** (R1). While a build runs, it also sees that app's secrets.
 - Root never runs or sources repo content. It reads process names and `.env.example` keys with `grep`, and `package.json` with `jq`.
 - GitHub's SSH host keys are pinned at `setup`, so deploy-key fetches don't trust on first use.
+- An app's state folder holds what the app wrote, so root never reads or extracts it as root: the state backup runs `tar` as the app's user, and `restore` removes and extracts as the app's user. A symlink in the folder therefore reaches only what the app could read or write already.
 
 ## 6. Moving the Tracklite VPS onto shipit
 
@@ -549,7 +639,7 @@ Steps 1–7 can ship as soon as redeploys work in shipit (S5). Steps 8–10 wait
 
 - **Static checks in CI:** `bash -n`, `shellcheck` and `shfmt -i 2 -ci -bn -d` on `bin`, `lib`, `libexec`, `install.sh` and `test`.
 - **Unit tests with bats-core in CI** (`.github/workflows/check.yml` runs `make` on `ubuntu-latest` for every push to `main` and every PR, with `shellcheck`, `shfmt`, `bats`, Caddy from its own apt repo, `systemd`, `gettext-base`, `nftables`, `openssh-server` and `logrotate` installed). Tests that need GNU tools or `flock` skip with a stated reason elsewhere, so CI is the real result. CI doesn't run as root, so the few tests that need root (`nft -c`, `sshd -t`) skip there too and are covered by e2e. The tests cover:
-  - the validators, with good and bad app, process, domain, port, repo, env-value and sourced-file values;
+  - the validators, with good and bad app, process, domain, port, repo, env-value, sourced-file, `BACKUP`, `BACKUP_PATHS`, `EXTRA_PACKAGES` and state-folder values, and `BACKUP`'s default;
   - app-name derivation from a repo URL, and port allocation;
   - the `deploy.conf` process-name parser and the `.env.example` key parser (both must ignore `$(...)`, comments and indentation tricks);
   - zero-config detection from a fixture `package.json`;
@@ -557,7 +647,8 @@ Steps 1–7 can ship as soon as redeploys work in shipit (S5). Steps 8–10 wait
   - `render()` against golden files, including failing on an unset variable;
   - every rendered site passes `caddy validate`, every rendered unit passes `systemd-analyze verify`, and the rendered admin sudoers file passes `visudo -cf`;
   - the sshd drop-in renders `prohibit-password` for `root` and `no` for a named admin;
-  - the dispatcher's root check and its unknown-command message.
+  - the dispatcher's root check and its unknown-command message;
+  - the state archive and restore scripts (paths, skipped paths, symlinks out of the folder; GNU-only, so they skip on macOS), `libexec/state-backup`'s naming and pruning, `backup`, `restore` and `status` in each backup mode, and that pruning and rollback leave the state folder alone.
 - **End-to-end in a throwaway VM.** Use `incus launch images:debian/13 --vm`, which has real systemd, so not Docker. `test/e2e/run.sh` builds the VM, installs the tool and runs the scenarios below, using:
   - local bare repos as `REPO` (`file://` for public repos, and `ssh://git@localhost/…` with a local sshd for the deploy-key flow);
   - `*.localhost` domains, so Caddy issues its own certificates;
@@ -583,6 +674,7 @@ Steps 1–7 can ship as soon as redeploys work in shipit (S5). Steps 8–10 wait
   | Process added, then rolled back past | The new instance runs after deploy. After rollback it's stopped and not restarted. |
   | Isolation | The `a` user can't read `/opt/b` or connect to b's database, and `deployer` can't read `/etc/a/env` |
   | Backup and restore | A backup file appears with the right name. Restore brings back matching row counts. Only `BACKUP_KEEP` files are kept. |
+  | Stateful app without PostgreSQL | Its state survives a redeploy and a rollback. `BACKUP=state` with `BACKUP_PATHS` backs up and restores only those paths, as the app's user, and checks health. A symlink out of the folder fails the backup. Another app's user can't read its state folder or backups, and its own user can't reach its backups. `BACKUP=none` refuses backup and restore by name. An app named like an existing `/var/lib` folder is refused. |
 - **Real host:** step 0 of the migration, a rehearsal on a snapshot.
 
 ## 8. Milestones
@@ -601,7 +693,8 @@ Each one is small enough to review and merge on its own, and each ends with CI g
 | S6 | `status`, `logs` and `env` | Show both fixture apps correctly, including a failed instance |
 | S7 | Backups: `libexec/backup`, the timer, `backup` and `restore` | The backup-and-restore scenario passes |
 | **S7.5** | **Tracklite backups and clean-up (steps 8–10)**, done by hand | The old units are gone, and the Tracklite `ops/` PR is merged |
-| Later | `deploy --artifact` (CI builds) · per-app Node via mise · `app-remove` · per-app build users (R1) · zero-downtime deploys (R6) · off-site backups · DNS records through the Hostinger API | — |
+| S8 | Stateful apps without PostgreSQL: `StateDirectory=`, `BACKUP=state` and `BACKUP_PATHS`, `EXTRA_PACKAGES` | The stateful-app scenario passes |
+| Later | `deploy --artifact` (CI builds) · per-app Node via mise · `app-remove` · per-app build users (R1) · zero-downtime deploys (R6) · off-site backups · DNS records through the Hostinger API · a writable `.next/cache` (R12) · backing up a database and a state folder together | — |
 
 ## 9. Risks
 
@@ -618,7 +711,8 @@ Each one is small enough to review and merge on its own, and each ends with CI g
 | R9 | **Backups are on the same disk as the database.** Losing the VPS loses the backups too. | That's your scope decision. Hostinger's own VPS snapshots or backups are the off-site copy until an "off-site backups" milestone. `shipit status` says where the backups are. |
 | R10 | **SSH lockout** from hardening or the firewall. | Hardening needs a key login in the current session and an admin with keys. Root keeps key login when it's the admin. The firewall reads the SSH port from `sshd -T`. Both leave the current session open, and Hostinger's browser terminal is the way back in. |
 | R11 | **The zero-config health check is lenient.** A page that answers 4xx on `/` counts as healthy. | Apps that want a strict check set `HEALTH_PATH` in `deploy.conf`. |
-| R12 | **Next.js writes `.next/cache` at runtime** (for example the image optimiser), but the release is read-only to the app user. | The same as Tracklite today. Add a per-app writable `CacheDirectory=` later if an app needs it. |
+| R12 | **Apps had nowhere to write at runtime.** The release is read-only to the app user and `PrivateTmp` is wiped on restart. | Partly closed (S8): every app has a persistent, private state folder, `/var/lib/<app>`, for its own data. Still open: Next.js writes `.next/cache` (the image optimiser, ISR) inside the release, where it can't, the same as Tracklite today. `CacheDirectory=` alone wouldn't help, because Next.js doesn't read a cache path from the environment; it would need the release's `.next/cache` to link to `/var/cache/<app>`. Later, if an app needs it. |
+| R13 | **A state backup copies files as they are.** A live SQLite database (WAL mode), or a file being written, can be copied half-done. Rollback doesn't undo state either. | Apps write their own consistent snapshots and list them in `BACKUP_PATHS` (section 2). Apps that migrate their state when they start should set `HEALTH_FAIL=rollback`, and their migrations must work with the previous release's code (R5). |
 
 ## 10. Decisions on open questions
 

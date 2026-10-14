@@ -76,6 +76,7 @@ matches() {
   need_envsubst
   matches shipit-backup@.service render "$tpl/shipit-backup@.service"
   matches shipit-backup@.timer render "$tpl/shipit-backup@.timer"
+  matches shipit-state-backup@.service render "$tpl/shipit-state-backup@.service"
 }
 
 @test "every template starts with the managed marker" {
@@ -146,10 +147,15 @@ matches() {
   # The checkout's libexec/backup stands in for the installed one.
   d=$BATS_TEST_TMPDIR/units
   mkdir -p "$d"
-  sed "s|/usr/local/lib/shipit/libexec/backup|$REPO_ROOT/libexec/backup|" "$tpl/shipit-backup@.service" \
+  sed "s|/usr/local/lib/shipit/libexec/|$REPO_ROOT/libexec/|" "$tpl/shipit-backup@.service" \
     >"$d/shipit-backup@.service"
+  sed "s|/usr/local/lib/shipit/libexec/|$REPO_ROOT/libexec/|" "$tpl/shipit-state-backup@.service" \
+    >"$d/shipit-state-backup@.service"
   cp "$tpl/shipit-backup@.timer" "$d/"
-  run systemd-analyze verify "$d/shipit-backup@.service" "$d/shipit-backup@.timer"
+  # setup installs the one timer template under both names.
+  cp "$tpl/shipit-backup@.timer" "$d/shipit-state-backup@.timer"
+  run systemd-analyze verify "$d/shipit-backup@.service" "$d/shipit-backup@.timer" \
+    "$d/shipit-state-backup@.service" "$d/shipit-state-backup@.timer"
   [ "$status" -eq 0 ] || {
     echo "$output"
     return 1
@@ -286,11 +292,26 @@ matches() {
   [ "$LOG_KEEP_DAYS" = 14 ]
   grep -qx 'BACKUP_KEEP=14' "$SHIPIT_ETC/host.conf"
   grep -qx 'MIN_FREE_DISK_GB=3' "$SHIPIT_ETC/host.conf"
+  grep -qx 'EXTRA_PACKAGES=' "$SHIPIT_ETC/host.conf"
+  [ -z "$EXTRA_PACKAGES" ]
+}
+
+@test "load_host_conf: EXTRA_PACKAGES is optional, and a quoted list of names is read as one value" {
+  f=$SHIPIT_ETC/host.conf
+  printf '%s\n' ACME_EMAIL= ADMIN_USER=root NODE_MAJOR=24 SWAP_SIZE=2G LOG_KEEP_DAYS=14 >"$f"
+  chmod 644 "$f"
+  EXTRA_PACKAGES=stale
+  load_host_conf "$f"
+  [ -z "$EXTRA_PACKAGES" ]
+  printf '%s\n' 'EXTRA_PACKAGES="build-essential python3"' >>"$f"
+  load_host_conf "$f"
+  [ "$EXTRA_PACKAGES" = 'build-essential python3' ]
 }
 
 @test "load_host_conf refuses bad values and unsafe files" {
   f=$SHIPIT_ETC/host.conf
-  for line in 'ADMIN_USER=Bad' 'NODE_MAJOR=v24' 'SWAP_SIZE=4' 'ACME_EMAIL=no-at-sign'; do
+  for line in 'ADMIN_USER=Bad' 'NODE_MAJOR=v24' 'SWAP_SIZE=4' 'ACME_EMAIL=no-at-sign' \
+    'EXTRA_PACKAGES="gcc;id"' 'EXTRA_PACKAGES="-y gcc"'; do
     printf '%s\n' ACME_EMAIL= ADMIN_USER=root NODE_MAJOR=24 SWAP_SIZE=2G LOG_KEEP_DAYS=14 "$line" >"$f"
     chmod 644 "$f"
     run load_host_conf "$f"
@@ -331,4 +352,22 @@ matches() {
   printf 'b\n' >"$BATS_TEST_TMPDIR/new"
   install_if_changed "$BATS_TEST_TMPDIR/new" "$BATS_TEST_TMPDIR/dest" 640
   [ "$(cat "$BATS_TEST_TMPDIR/dest")" = b ]
+}
+
+@test "install_packages installs only what's missing, so a re-run changes nothing" {
+  # dpkg-query: the packages listed in $BATS_TEST_TMPDIR/installed are installed.
+  printf 'build-essential\n' >"$BATS_TEST_TMPDIR/installed"
+  stub dpkg-query 'grep -qx "${!#}" "'"$BATS_TEST_TMPDIR"'/installed" && printf installed'
+  stub apt-get 'echo "$*" >>"'"$BATS_TEST_TMPDIR"'/apt.calls"
+[ "$5" != install ] || { shift 5; printf "%s\n" "$@" >>"'"$BATS_TEST_TMPDIR"'/installed"; }'
+  SETUP_CHANGES=()
+  install_packages build-essential python3
+  [ "$(grep -c ' install ' "$BATS_TEST_TMPDIR/apt.calls")" = 1 ]
+  grep -q ' install python3$' "$BATS_TEST_TMPDIR/apt.calls"
+  [ "${SETUP_CHANGES[*]}" = 'Installed python3' ]
+  : >"$BATS_TEST_TMPDIR/apt.calls"
+  SETUP_CHANGES=()
+  install_packages build-essential python3
+  [ ! -s "$BATS_TEST_TMPDIR/apt.calls" ]
+  [ "${#SETUP_CHANGES[@]}" -eq 0 ]
 }

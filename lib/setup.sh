@@ -140,13 +140,14 @@ host_conf_text() {
     "SWAP_SIZE=$SWAP_SIZE" \
     "BACKUP_KEEP=14" \
     "LOG_KEEP_DAYS=14" \
-    "MIN_FREE_DISK_GB=3"
+    "MIN_FREE_DISK_GB=3" \
+    "EXTRA_PACKAGES="
 }
 
 # load_host_conf <file>: reads and validates the values setup uses.
 load_host_conf() {
   local var value
-  for var in ACME_EMAIL ADMIN_USER NODE_MAJOR SWAP_SIZE LOG_KEEP_DAYS; do
+  for var in ACME_EMAIL ADMIN_USER NODE_MAJOR SWAP_SIZE LOG_KEEP_DAYS EXTRA_PACKAGES; do
     value=$(conf_get "$1" "$var") || return 1
     printf -v "$var" '%s' "$value"
   done
@@ -154,6 +155,7 @@ load_host_conf() {
     || ! check_admin_user "$ADMIN_USER" \
     || ! check_number NODE_MAJOR "$NODE_MAJOR" \
     || ! check_number LOG_KEEP_DAYS "$LOG_KEEP_DAYS" \
+    || ! { [ -z "$EXTRA_PACKAGES" ] || check_packages "$EXTRA_PACKAGES"; } \
     || ! [[ $SWAP_SIZE =~ ^[1-9][0-9]*G$ ]]; then
     err "Fix $1 (SWAP_SIZE looks like 4G), then re-run sudo shipit setup."
     return 1
@@ -226,6 +228,8 @@ setup_host_conf() {
 setup_packages() {
   local lists_changed='' installed_major
   install_packages "${BASE_PACKAGES[@]}"
+  # shellcheck disable=SC2086 # split on spaces; check_packages allows no glob characters
+  [ -z "$EXTRA_PACKAGES" ] || install_packages $EXTRA_PACKAGES
 
   if ! compgen -G '/etc/apt/sources.list.d/pgdg.*' >/dev/null; then
     /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null \
@@ -401,7 +405,8 @@ setup_folders() {
   install -d -m 755 "$SHIPIT_VAR"
   # 751: caddy (not in adm) must reach each app's access.log, but nobody else can list the folder.
   install -d -m 751 -o root -g adm /var/log/shipit
-  # 711: postgres must reach its own /var/backups/shipit/<app>, but can't list the others.
+  # 711: postgres (and the state backup unit) must reach an app's own /var/backups/shipit/<app>, but
+  # nobody can list the others.
   install -d -m 711 /var/backups/shipit
 }
 
@@ -413,8 +418,10 @@ setup_rotation_and_backups() {
   if install_if_changed "$SETUP_TMP/logrotate" /etc/logrotate.d/shipit 644; then
     note_change "Wrote /etc/logrotate.d/shipit (logs kept $LOG_KEEP_DAYS days)"
   fi
-  for unit in shipit-backup@.service shipit-backup@.timer; do
-    render "$SHIPIT_TEMPLATES/$unit" >"$SETUP_TMP/$unit" || exit 1
+  # Both backup services share one timer template: it starts the service with its own name.
+  for unit in shipit-backup@.service shipit-backup@.timer shipit-state-backup@.service \
+    shipit-state-backup@.timer; do
+    render "$SHIPIT_TEMPLATES/${unit/state-backup@.timer/backup@.timer}" >"$SETUP_TMP/$unit" || exit 1
     if install_if_changed "$SETUP_TMP/$unit" "/etc/systemd/system/$unit" 644; then
       units_changed=1
       note_change "Wrote /etc/systemd/system/$unit"

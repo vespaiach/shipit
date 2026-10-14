@@ -131,7 +131,7 @@ state() { printf '%s %s\n' "$1" "$2" >>"$BATS_TEST_TMPDIR/states"; }
   current    none yet. Deploy it with: sudo shipit deploy next_app
   previous   none
   deploy.log none yet
-  backup     none: next_app has no database' ]
+  backup     none (BACKUP=none: next_app has no backups)' ]
   [ ! -e "$BATS_TEST_TMPDIR/curl.calls" ]
 }
 
@@ -146,6 +146,31 @@ state() { printf '%s %s\n' "$1" "$2" >>"$BATS_TEST_TMPDIR/states"; }
   [[ $output == *'  web        INACTIVE. See: sudo shipit logs next_app web'* ]]
   [[ $output == *'  health     / got no answer (UNHEALTHY)'* ]]
   [[ $output == *'  backup     none yet (last run: never run)'* ]]
+}
+
+@test "status: BACKUP=state reports the newest archive and the state unit's last run" {
+  write_app_conf st REPO=x BRANCH=main DOMAIN=st.localhost PORT=3004 DATABASE= BACKUP=state
+  mkdir -p "$BACKUP_ROOT/st"
+  touch "$BACKUP_ROOT/st/st-20261012T030000Z.tar.gz" "$BACKUP_ROOT/st/st-20261013T030000Z.tar.gz" \
+    "$BACKUP_ROOT/st/st-20261014T030000Z.dump"
+  printf 'Result=success\nExecMainExitTimestamp=Tue 2026-10-13 03:12:00 UTC\n' >"$BATS_TEST_TMPDIR/show"
+  run cmd_status st
+  [ "$status" -eq 0 ]
+  [[ $output == *$'\n  backup     st-20261013T030000Z.tar.gz (last run: success)\n'* ]]
+  grep -qx 'show -p Result -p ExecMainExitTimestamp shipit-state-backup@st.service' "$BATS_TEST_TMPDIR/systemctl.calls"
+}
+
+@test "status: BACKUP=none says so plainly, even with a DATABASE; a bad BACKUP is a config problem" {
+  app db_a db-a.localhost 3005 db_a
+  printf 'BACKUP=none\n' >>"$SHIPIT_ETC/apps/db_a.conf"
+  run cmd_status db_a
+  [ "$status" -eq 0 ]
+  [[ $output == *$'\n  backup     none (BACKUP=none: db_a has no backups)\n'* ]]
+  if grep -qs 'shipit-backup@db_a' "$BATS_TEST_TMPDIR/systemctl.calls"; then return 1; fi
+  printf 'BACKUP=sqlite\n' >>"$SHIPIT_ETC/apps/db_a.conf"
+  run cmd_status db_a
+  [ "$status" -eq 0 ]
+  [[ $output == *"  config     $SHIPIT_ETC/apps/db_a.conf has a problem"* ]]
 }
 
 @test "status: without an app, every app in name order; a bad config doesn't stop the others" {

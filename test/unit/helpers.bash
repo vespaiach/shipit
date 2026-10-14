@@ -10,6 +10,8 @@ load_common() {
   SHIPIT_ETC=$BATS_TEST_TMPDIR/etc
   SHIPIT_VAR=$BATS_TEST_TMPDIR/var
   # shellcheck disable=SC2034 # read by lib/common.sh
+  STATE_ROOT=$BATS_TEST_TMPDIR/state
+  # shellcheck disable=SC2034 # read by lib/common.sh
   SHIPIT_OWNER_UID=$(id -u)
   mkdir -p "$SHIPIT_ETC/apps" "$SHIPIT_VAR"
 }
