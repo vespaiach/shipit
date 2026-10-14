@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SHFMT_VERSION: v3.14.1
+      SHELLCHECK_VERSION: v0.11.0
     steps:
       - uses: actions/checkout@v4
 
@@ -26,9 +27,12 @@ jobs:
           curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
             | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y bats shellcheck caddy gettext-base jq logrotate nftables openssh-server sudo
+          sudo apt-get install -y bats caddy gettext-base jq logrotate nftables openssh-server sudo
           sudo curl -fsSL -o /usr/local/bin/shfmt \
             "https://github.com/mvdan/sh/releases/download/$SHFMT_VERSION/shfmt_${SHFMT_VERSION}_linux_amd64"
           sudo chmod +x /usr/local/bin/shfmt
+          # Ubuntu's shellcheck (0.9) lacks bats support that the tests rely on, so pin it like shfmt.
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VERSION/shellcheck-$SHELLCHECK_VERSION.linux.x86_64.tar.xz" \
+            | sudo tar -xJ -C /usr/local/bin --strip-components=1 "shellcheck-$SHELLCHECK_VERSION/shellcheck"
 
       - run: make
