@@ -29,17 +29,6 @@ backup_database() {
   printf '%s\n' "$value"
 }
 
-# backup_prune <app> <keep>: deletes all but the newest <keep> of the app's dumps. Temp files and other
-# names in the folder are left alone.
-backup_prune() {
-  local names=() i
-  mapfile -t names < <(backup_files "$1")
-  for ((i = 0; i < ${#names[@]} - $2; i++)); do
-    rm -f -- "$BACKUP_ROOT/$1/${names[i]}"
-    log "Deleted ${names[i]}."
-  done
-}
-
 backup_exit() {
   [ -z "$BACKUP_TMP" ] || rm -f -- "$BACKUP_TMP"
 }

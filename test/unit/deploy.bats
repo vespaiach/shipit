@@ -244,6 +244,66 @@ matches() {
   [ "$status" -eq 1 ]
 }
 
+@test "app name: refused when a folder of that name already exists in the state root" {
+  stub getent 'exit 2'
+  stub systemctl 'exit 1'
+  stub id 'exit 1'
+  mkdir -p "$STATE_ROOT/apt"
+  run app_name_free apt
+  [ "$status" -eq 1 ]
+  [ "$output" = "$STATE_ROOT/apt already exists and isn't the apt app's own folder, so systemd would hand it to apt. Choose another app name." ]
+}
+
+# load_conf_stubs: what deploy_load_conf asks the host: no such user, no unit, nothing listening.
+load_conf_stubs() {
+  stub getent 'exit 2'
+  stub systemctl 'exit 1'
+  stub ss 'exit 0'
+}
+
+@test "deploy_load_conf: BACKUP defaults to postgres with a DATABASE and none without" {
+  load_conf_stubs
+  write_app_conf tracklite REPO=https://github.com/me/tracklite BRANCH=main DOMAIN=t.example.com PORT=3001 DATABASE=tracklite
+  deploy_load_conf
+  [ "$BACKUP" = postgres ]
+  write_app_conf tracklite REPO=https://github.com/me/tracklite BRANCH=main DOMAIN=t.example.com PORT=3001 DATABASE=
+  deploy_load_conf
+  [ "$BACKUP" = none ]
+  write_app_conf tracklite REPO=https://github.com/me/tracklite BRANCH=main DOMAIN=t.example.com PORT=3001 \
+    BACKUP=state 'BACKUP_PATHS="backups photos"'
+  deploy_load_conf
+  [ "$BACKUP" = state ]
+  [ "$BACKUP_PATHS" = 'backups photos' ]
+}
+
+@test "deploy_load_conf: a bad BACKUP or BACKUP_PATHS, or BACKUP=postgres without a DATABASE, is refused" {
+  load_conf_stubs
+  local base=(REPO=https://github.com/me/tracklite BRANCH=main DOMAIN=t.example.com PORT=3001)
+  write_app_conf tracklite "${base[@]}" BACKUP=files
+  run deploy_load_conf
+  [ "$status" -eq 1 ]
+  [[ $output == "Invalid BACKUP 'files': use postgres, state or none."* ]]
+  write_app_conf tracklite "${base[@]}" BACKUP=postgres
+  run deploy_load_conf
+  [ "$status" -eq 1 ]
+  [[ $output == "BACKUP=postgres needs a DATABASE. Set DATABASE, or use BACKUP=state or BACKUP=none."* ]]
+  write_app_conf tracklite "${base[@]}" BACKUP=state BACKUP_PATHS=../etc
+  run deploy_load_conf
+  [ "$status" -eq 1 ]
+  [[ $output == "Invalid BACKUP_PATHS entry '../etc'"* ]]
+  [[ $output == *"Fix $SHIPIT_ETC/apps/tracklite.conf, then re-run sudo shipit deploy tracklite." ]]
+}
+
+@test "deploy_load_conf: refuses an app whose state folder belongs to someone else" {
+  load_conf_stubs
+  stub id 'echo 99999'
+  write_app_conf tracklite REPO=https://github.com/me/tracklite BRANCH=main DOMAIN=t.example.com PORT=3001
+  mkdir -p "$STATE_ROOT/tracklite"
+  run deploy_load_conf
+  [ "$status" -eq 1 ]
+  [[ $output == "$STATE_ROOT/tracklite already exists and isn't the tracklite app's own folder"* ]]
+}
+
 @test "app config round-trips through conf_get" {
   REPO='file:///srv/git/odd name&co.git'
   BRANCH=main

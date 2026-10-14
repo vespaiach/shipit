@@ -1,0 +1,17 @@
+# managed by shipit
+[Unit]
+Description=State folder backup of %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/shipit/host.conf
+ExecStart=/usr/local/lib/shipit/libexec/state-backup %i
+# Root only to switch to the app's user for tar, and to own the archives the app can't reach.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+# Everything is read-only (the state folder included) except the app's backup folder.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/shipit/%i

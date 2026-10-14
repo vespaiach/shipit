@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# libexec/state-backup <app> (plan §3): run by shipit-state-backup@<app>.service as root, with only
+# CAP_SETUID and CAP_SETGID, host.conf's BACKUP_KEEP in the environment, the app's state folder
+# read-only and only its backup folder writable. tar runs as the app's user (state_archive) and writes
+# BACKUP_PATHS (or the whole folder) to a temp file in $BACKUP_ROOT/<app>/, which is renamed to
+# <app>-<YYYYmmddTHHMMSSZ>.tar.gz only when tar succeeded. Then all but the newest BACKUP_KEEP archives
+# are deleted. A failure exits non-zero, which the unit's Result (and so shipit status) shows.
+
+# shellcheck source=lib/common.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+
+BACKUP_TMP=''
+
+state_backup_exit() {
+  [ -z "$BACKUP_TMP" ] || rm -f -- "$BACKUP_TMP"
+}
+
+state_backup() {
+  local app=${1-} conf mode paths dir name
+  check_app_name "$app" || exit 1
+  check_number BACKUP_KEEP "${BACKUP_KEEP-}" || die "Set BACKUP_KEEP in $SHIPIT_ETC/host.conf."
+  conf=$SHIPIT_ETC/apps/$app.conf
+  mode=$(conf_get "$conf" BACKUP) || exit 1
+  [ "$mode" = state ] || die "$app doesn't have BACKUP=state in $conf, so there's no state folder to back up."
+  paths=$(conf_get "$conf" BACKUP_PATHS) || exit 1
+  [ -z "$paths" ] || check_backup_paths "$paths" || exit 1
+  dir=$BACKUP_ROOT/$app
+
+  umask 077
+  trap state_backup_exit EXIT
+  BACKUP_TMP=$(mktemp "$dir/.tar-XXXXXX") || die "Can't write to $dir."
+  # shellcheck disable=SC2086 # split on spaces; check_backup_paths allows no glob characters
+  state_archive "$app" $paths >"$BACKUP_TMP" \
+    || die "Archiving $STATE_ROOT/$app failed, so no backup was written."
+  name=$app-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+  mv -f -- "$BACKUP_TMP" "$dir/$name" || die "Renaming the archive to $dir/$name failed."
+  BACKUP_TMP=''
+  log "Wrote $dir/$name ($(wc -c <"$dir/$name" | tr -d ' ') bytes)."
+  backup_prune "$app" "$BACKUP_KEEP" tar.gz
+}
+
+# Run only when executed; the unit tests source this file and call state_backup.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  set -euo pipefail
+  state_backup "$@"
+fi

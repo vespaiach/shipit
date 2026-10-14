@@ -17,8 +17,8 @@ Usage: sudo shipit <command> [arguments]
   logs <app> [process | access | deploy]
                                      Follow an app's log files
   env <app>                          Edit an app's environment file
-  backup <app>                       Take a database backup now
-  restore <app> [file | latest]      Restore a database backup
+  backup <app>                       Take a backup now (database or state folder)
+  restore <app> [file | latest]      Restore a backup
   help                               Show this help
 EOF
 }
