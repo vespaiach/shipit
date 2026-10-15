@@ -1,3 +1,0 @@
-# managed by shipit: ci may run only `shipit remote`; each ci key's forced command fixes the arguments.
-Defaults:ci env_keep += SSH_ORIGINAL_COMMAND
-ci ALL=(root) NOPASSWD: ${SHIPIT_BIN} remote *

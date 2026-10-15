@@ -9,7 +9,7 @@ each of them from its GitHub repo:
 
 Sites can be `static` (Caddy serves a folder), `node` (any server listening on `$PORT`) or `nextjs`.
 Caddy is the web server for all of them and gets their TLS certificates automatically. No command
-asks a question, so each one works over SSH from a laptop or from GitHub Actions.
+asks a question, so each one works over SSH from a laptop.
 
 [docs/plan.md](docs/plan.md) is the full spec, with the reasons behind each choice. This README is the
 manual.
@@ -23,11 +23,10 @@ manual.
 5. [Secrets](#secrets)
 6. [Node and Next.js sites](#node-and-nextjs-sites)
 7. [Rolling back](#rolling-back)
-8. [Deploying from GitHub Actions](#deploying-from-github-actions)
-9. [Logs](#logs)
-10. [Server layout and security](#server-layout-and-security)
-11. [Removing a site](#removing-a-site)
-12. [Limitations](#limitations)
+8. [Logs](#logs)
+9. [Server layout and security](#server-layout-and-security)
+10. [Removing a site](#removing-a-site)
+11. [Limitations](#limitations)
 13. [Development](#development)
 
 ## Requirements
@@ -56,28 +55,16 @@ ssh root@vps shipit setup
   `gettext-base`, `acl`, `ufw`, `fail2ban`, `unattended-upgrades`, `sudo`, `ca-certificates` and
   `gnupg`, plus a pinned `corepack` (for pnpm and yarn). The Node.js LTS major is looked up on the
   first run and kept in `/etc/shipit/host.conf`; later runs never change it;
-- creates `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`, `/srv` and `/var/log/shipit`,
-  and the `ci` user that GitHub Actions logs in as;
+- creates `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`, `/srv` and `/var/log/shipit`;
 - writes `/etc/caddy/Caddyfile` (which imports `/etc/caddy/sites/*.caddy`) and reloads Caddy;
 - turns on ufw (the ports sshd listens on, 80/tcp, 443/tcp, 443/udp; everything else incoming is
   denied), fail2ban's `sshd` jail and unattended-upgrades;
-- writes `/etc/sudoers.d/shipit-ci` (the `ci` user may run only `shipit remote`);
 - turns off SSH password logins (`/etc/ssh/sshd_config.d/10-shipit.conf`), only when that can't lock
-  you out (see [Requirements](#requirements));
-- prints the VPS's SSH host keys as known_hosts lines, for CI:
-
-  ```
-  <host> ssh-ed25519 AAAA...
-  <host> ecdsa-sha2-nistp256 AAAA...
-  Replace <host> with the address CI connects to (use [host]:port if SSH isn't on 22), and save these lines as the GitHub secret VPS_KNOWN_HOSTS.
-  ```
+  you out (see [Requirements](#requirements)).
 
 Setup only overwrites files it wrote itself (marked `# managed by shipit`), and Caddy's untouched
 default Caddyfile. A file you wrote or changed by hand stops it, with a message saying to move the
 file away (an apt source file is left alone instead).
-
-`shipit setup --ci-key <name> <public key file | ->` (repeatable) also installs a site's CI key; see
-[Deploying from GitHub Actions](#deploying-from-github-actions).
 
 ## shipit.ini
 
@@ -317,43 +304,6 @@ ssh root@vps shipit rollback docs
 Each release's commit is pinned in the site's `repo.git`, so rollback works after a force-push and
 `git gc`.
 
-## Deploying from GitHub Actions
-
-Each site gets its own CI key, which can only deploy or roll back that site.
-
-1. **Deploy the site once by hand** (above). CI only redeploys and rolls back sites whose first
-   deploy succeeded.
-2. **Make a key pair** on your laptop, without a passphrase:
-   ```bash
-   ssh-keygen -t ed25519 -N '' -C 'shipit ci blog' -f ~/.ssh/shipit_blog_ci
-   ```
-3. **Give the public half to the VPS.** Other sites' keys are kept; running it again for a site
-   replaces its key.
-   ```bash
-   ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub
-   # several at once: shipit setup --ci-key blog blog.pub --ci-key api api.pub
-   ```
-   The file must be the single line `ssh-keygen` wrote (ed25519, ECDSA, security-key or RSA), with
-   no options. Every key is checked before setup changes anything.
-4. **Add the repo's secrets** (Settings → Secrets and variables → Actions):
-   - `SHIPIT_KEY`: the private key (`~/.ssh/shipit_blog_ci`);
-   - `VPS_KNOWN_HOSTS`: the lines `setup` printed, with `<host>` replaced;
-   - `VPS_HOST`: the name or IP CI connects to;
-   - `VPS_PORT`: only if SSH isn't on 22.
-5. **Add the workflows.** Copy [examples/deploy.yml](examples/deploy.yml) (deploys every push to
-   `main`, passing the commit SHA) and [examples/rollback.yml](examples/rollback.yml) (run by hand
-   from the Actions tab) to the repo's `.github/workflows/`, and replace `blog` with the site's name.
-
-The key logs in as `ci`, whose `authorized_keys` line forces `sudo shipit remote <name>`. That
-accepts only `deploy <name> [<commit sha or branch>]` or `rollback <name>` and refuses anything else
-(another site, options, shell syntax, an interactive login). The build streams to the Actions log,
-and the step fails when the deploy or rollback does. To revoke a site's key, delete its line (ending
-in `shipit:<name>`) from `/home/ci/.ssh/authorized_keys`.
-
-The workflows pin the VPS's host key (`StrictHostKeyChecking=yes` with `VPS_KNOWN_HOSTS`), keep
-long builds connected, and share one `concurrency` group per site so deploys and rollbacks don't
-overlap; plan section 5.4 explains each choice.
-
 ## Logs
 
 ```bash
@@ -385,7 +335,6 @@ output goes to the SSH session (and so the Actions log) and isn't kept on the VP
 /var/cache/shipit-<name>/                   Next.js runtime cache
 /var/log/shipit/<name>/access.log           access log
 /var/lib/shipit/                            locks
-/home/ci/.ssh/authorized_keys               one line per site CI key
 ```
 
 Who can do what:
@@ -399,10 +348,8 @@ Who can do what:
   cache folders.
 - **`caddy`** can read a static site's `static.root` and nothing else of the site (ACLs, not group
   membership), and shipit refuses a release whose `static.root` has a symlink pointing outside it.
-- **`ci`** owns nothing (its home is root's) and each of its keys can only run `deploy` or
-  `rollback` for one site.
 
-Sites are isolated from each other: separate users, code, data, ports and CI keys. Every
+Sites are isolated from each other: separate users, code, data and ports. Every
 `shipit.ini` value is checked against a strict pattern, and every config is validated on a temp copy
 before it's installed. **Anyone who can push to a site's deployed branch runs code on the VPS** as
 `<name>-build`, and the build sees that site's secrets: deploy only repos you trust.
@@ -417,7 +364,6 @@ rm -f /etc/systemd/system/shipit-<name>.service && systemctl daemon-reload
 rm -f /etc/caddy/sites/<name>.caddy && systemctl reload caddy
 rm -rf /srv/<name> /var/cache/shipit-<name> /var/log/shipit/<name>
 rm -f /etc/shipit/sites/<name>.conf /etc/shipit/sites/<name>.env /var/lib/shipit/<name>.lock
-sed -i '/ shipit:<name>$/d' /home/ci/.ssh/authorized_keys   # if it had a CI key
 userdel <name>-build && userdel <name>
 rm -rf /var/lib/shipit-<name>                # the site's data: see below
 ```

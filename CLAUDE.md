@@ -2,16 +2,15 @@
 
 shipit (1.0.0) is a bash tool that sets up a Debian 13+ or Ubuntu 26.04+ VPS (`shipit setup`), deploys
 static, Node and Next.js sites from GitHub onto it (`shipit deploy`) and goes back one release
-(`shipit rollback`), by hand as root or from GitHub Actions (the `ci` user, `shipit remote`).
+(`shipit rollback`), by hand as root.
 **docs/plan.md is the spec**: read it before changing anything, and keep it, README.md (the user
 manual) and this file in step with the code.
 
 ## Layout
 
-- `bin/shipit` — dispatcher. Checks the command (`setup | deploy | rollback | remote | help`), prints
+- `bin/shipit` — dispatcher. Checks the command (`setup | deploy | rollback | help`), prints
   usage for `help` or no command, refuses non-root (except `help`), sources `lib/common.sh` and
-  `lib/<command>.sh`, and calls `cmd_<command> "$@"`. `remote` is internal (the `ci` user's forced
-  command) and isn't in `usage`. A new command needs its library, an entry in the `case` and, if
+  `lib/<command>.sh`, and calls `cmd_<command> "$@"`. A new command needs its library, an entry in the `case` and, if
   public, a line in `usage`.
 - `lib/common.sh` — the test-seam constants; `log`/`err`/`die`; `check_domain`, `check_port`;
   `health_ok`; `user_state` (is a user missing, shipit's by its GECOS, or someone else's);
@@ -24,12 +23,10 @@ manual) and this file in step with the code.
   `site_conf_write` (checked, then one rename), `site_next_port`.
 - `lib/setup.sh` (sources `config.sh`) — plan §5.1. Helpers the tests call: `version_ge`,
   `os_supported`, `node_lts_major`, `host_conf_read`, `sshd_ports`, `has_authorized_key`,
-  `session_used_key`, `ssh_key_login_ok`, `known_hosts_lines`, `may_replace`, `ci_key_parse`,
-  `setup_args` (every `--ci-key`, checked before anything changes; sets `CI_NAMES`/`CI_KEYS`),
-  `ci_keys_merge`. Steps, in `cmd_setup` order: `setup_packages` (`setup_host_conf`,
-  `setup_apt_repos`, `setup_corepack`), `setup_dirs`, `setup_ci_user`, `setup_caddy`,
-  `setup_firewall`, `setup_fail2ban`, `setup_auto_upgrades`, `setup_sudoers`, `setup_ci_keys`,
-  `setup_ssh`, `print_known_hosts`. Constants: `COREPACK_VERSION`, `PACKAGES`, `SHIPIT_BIN`.
+  `session_used_key`, `ssh_key_login_ok`, `may_replace`. Steps, in `cmd_setup` order: `setup_packages` (`setup_host_conf`,
+  `setup_apt_repos`, `setup_corepack`), `setup_dirs`, `setup_caddy`,
+  `setup_firewall`, `setup_fail2ban`, `setup_auto_upgrades`,
+  `setup_ssh`. Constants: `COREPACK_VERSION`, `PACKAGES`.
 - `lib/deploy.sh` (sources `config.sh`) — plan §5.2. Helpers: `deploy_args`, `same_repo`,
   `default_branch`, `install_default`, `build_default`, `missing_env_keys`, `env_file_check` (root's
   parse-only check of the env file), `release_name`, `release_sha`, `path_resolve`,
@@ -47,20 +44,15 @@ manual) and this file in step with the code.
   `HEALTH_MAX_TIME`.
 - `lib/rollback.sh` (sources `deploy.sh`, reusing its state globals and helpers) — plan §5.3:
   `rollback_args`, `rollback_links` (previous first, decision 60), `rollback_revert`, `cmd_rollback`.
-- `lib/remote.sh` (sources `rollback.sh`) — plan §5.4: `remote_parse` checks `$SSH_ORIGINAL_COMMAND`
-  against the key's site (sets `REMOTE_CMD`, `REMOTE_ARGS`); `cmd_remote` then calls `cmd_deploy` or
-  `cmd_rollback` in the same process.
 - `templates/` — what `render` fills in (plan §6): `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
-  `sudoers-ci`, `authorized_keys` (one line, no marker), `apt-caddy.list`, `apt-nodesource.list`,
+  `apt-caddy.list`, `apt-nodesource.list`,
   `apt-nodejs.pref`, `apt-auto-upgrades`; a site's Caddy file in parts (`site-log.caddy` with the
   marker, then `site-static.caddy` or `site-proxy.caddy`, then `site-alias.caddy` per alias); a
   node/nextjs unit in parts (`site.service` with `[Service]` last, then `site-data.service`,
   `site-nextjs.service`). `github_known_hosts` is copied data, used by git's ssh as is.
-- `examples/` — `deploy.yml`, `rollback.yml`: plan §5.4's workflows, kept identical to the plan's code
-  blocks by a test in `test/unit/remote.bats`.
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/` — bats: one `.bats` per library or concern (`dispatcher`, `validators`, `render`,
-  `files`, `locks`, `config`, `setup`, `deploy`, `rollback`, `remote`). `helpers.bash` (sources
+  `files`, `locks`, `config`, `setup`, `deploy`, `rollback`). `helpers.bash` (sources
   `common.sh` with paths in a temp dir; `stub`; `atomic_mv`) and `deploy_helpers.bash` (the temp-root
   harness for `deploy.bats` and `rollback.bats`: `deploy_setup`, `host`, `commit`, `ini`, `node_ini`,
   `curl_codes`, ...). `test/golden/` holds expected rendered output; `test/fixtures/` the `shipit.ini`
@@ -75,16 +67,15 @@ manual) and this file in step with the code.
 - **Test seams are plain constants**, never read from the environment, never flags; tests reassign
   them after sourcing. In `lib/common.sh`: `SHIPIT_ETC`, `SHIPIT_VAR`, `SRV_ROOT`, `CADDY_ETC`,
   `LOG_ROOT`, `SYSTEMD_DIR`, `CACHE_ROOT`, `OS_RELEASE`, `APT_ETC`, `SSH_ETC`, `FAIL2BAN_ETC`,
-  `ROOT_HOME`, `CI_HOME`, `SUDOERS_DIR`, `SHIPIT_TEMPLATES`. In `lib/deploy.sh`: `BUILD_PATH` and the
+  `ROOT_HOME`, `SHIPIT_TEMPLATES`. In `lib/deploy.sh`: `BUILD_PATH` and the
   `HEALTH_*` timings. Lock helpers take the lock path.
 - **Call commands by name** (no absolute paths, no `$EUID`): tests stub `id`, `mv`, `chown`,
   `setfacl`, `useradd`, `getent`, `runuser`, `systemctl`, `systemd-analyze`, `caddy`, `curl`, `gpg`,
-  `apt-get`, `apt-config`, `dpkg-query`, `npm`, `corepack`, `ufw`, `sshd`, `journalctl`, `visudo` and
+  `apt-get`, `apt-config`, `dpkg-query`, `npm`, `corepack`, `ufw`, `sshd`, `journalctl` and
   `ssh` through `PATH`. Deploy tests run git for real: the `runuser` stub runs commands as the test
   user, `BUILD_PATH` gets the stubs prepended, and `url.<local repo>.insteadOf` in the build user's
   `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
-- **The only environment input is `$SSH_ORIGINAL_COMMAND`**, read by `shipit remote` and parsed
-  strictly. Repo commands run under `env -i`.
+- **No environment input.** shipit reads nothing from the environment; repo commands run under `env -i`.
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value from `shipit.ini`, a site `.conf`, `host.conf` or the command line
   before using it. Every `shipit.ini` key has its own pattern; control characters are never allowed.
@@ -97,8 +88,8 @@ manual) and this file in step with the code.
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
   printing nothing, on an unset or empty variable. Never `sed` values into files. Variable-length
   files are rendered in parts and concatenated (decisions 46, 51).
-- **Validate on a temp copy, then install**: render to a temp file, check it (`visudo -cqf`,
-  `caddy validate` run as `caddy`, `systemd-analyze verify` on `<tmp>/unit/shipit-<name>.service`,
+- **Validate on a temp copy, then install**: render to a temp file, check it
+  (`caddy validate` run as `caddy`, `systemd-analyze verify` on `<tmp>/unit/shipit-<name>.service`,
   `sshd -t -f`, `apt-config -c`), then install (`install_if_changed`).
 - **Atomic switches** go through `atomic_link <target> <link>` (`ln -s target link.new && mv -T
   link.new link`); deploy's switch (C.1) and rollback point `previous` before `current` (decision 60).
