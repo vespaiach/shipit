@@ -1,7 +1,8 @@
 # shipit
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
-> milestone at a time; M0 (skeleton) is done, the commands aren't implemented yet.
+> milestone at a time; M0 (skeleton) and M1 (`shipit.ini` parser) are done, the commands aren't
+> implemented yet.
 
 ## 1. What it is
 

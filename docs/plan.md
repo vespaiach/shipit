@@ -108,27 +108,34 @@ type = nextjs
 |---|---|---|
 | `site.name` | yes | Site name: `^[a-z][a-z0-9-]{0,24}$`, at most 25 characters, so `<name>-build` fits Linux's 32-character username limit. Used for folders, users, unit, Caddy file. Must match the name given on the first deploy (5.2 A). |
 | `site.domain` | yes | Primary hostname. Must not be used by another site. |
-| `site.alias` | no, repeatable | Extra hostname, redirected (308) to `site.domain`. One per line. |
+| `site.alias` | no, repeatable | Extra hostname, redirected (308) to `site.domain`. One per line. Not equal to `site.domain`. |
 | `site.type` | yes | `static`, `node` or `nextjs`. Can't change after the first deploy (decision 15). |
-| `site.health` | no | Path checked after a Node/Next.js switch. Default `/`. Needs a status below 500; set explicitly → needs exactly 200. Must match `^/[A-Za-z0-9._~/-]*$`. |
-| `site.env` | no, repeatable | A key that must exist in the site's env file on the server; deploy fails, naming the missing ones, if any are absent. One per line. |
-| `node.install` | no | Default: picked by lockfile — `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`. Runs without the site's secrets (see below). |
-| `node.build` | no | Default: `npm run build` if `package.json` has a `build` script, else nothing. |
-| `node.start` | `node`: yes | Command that starts the server. It must listen on `$PORT`. `nextjs` default: `./node_modules/.bin/next start -p $PORT` (`next` isn't on the unit's PATH). It's written into the unit's `ExecStart=`, so a newline or other control character, `'`, `%` or `\` is rejected; systemd expands `$VAR` itself, so `$PORT` works. |
-| `static.root` | `static`: yes | Folder (relative to the release) Caddy serves. Must match `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`, with no `..` segment. A `static` site may still have `node.install`/`node.build` (e.g. Vite, `next export`). |
+| `site.health` | no | Node/Next.js only. Path checked after a switch. Default `/`. Needs a status below 500; set explicitly → needs exactly 200. Must match `^/[A-Za-z0-9._~/-]*$`. |
+| `site.env` | no, repeatable | A key that must exist in the site's env file on the server; deploy fails, naming the missing ones, if any are absent. One per line. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
+| `node.install` | no | Default: picked by lockfile — `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --immutable`. Runs without the site's secrets (see below). Any non-empty command line without control characters: it runs as `<name>-build` and never lands in a rendered file. |
+| `node.build` | no | Default: `npm run build` if `package.json` has a `build` script, else nothing. Same rule as `node.install`. |
+| `node.start` | `node`: yes; not for `static` | Command that starts the server. It must listen on `$PORT`. `nextjs` default: `./node_modules/.bin/next start -p $PORT` (`next` isn't on the unit's PATH). It's written into the unit's `ExecStart=`, so a newline or other control character, `'`, `%` or `\` is rejected; systemd expands `$VAR` itself, so `$PORT` works. |
+| `static.root` | `static`: yes | Folder (relative to the release) Caddy serves. Must match `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`, with no `.` or `..` segment (so never the release itself, which holds `shipit.ini`). Not for `node`/`nextjs`. A `static` site may still have `node.install`/`node.build` (e.g. Vite, `next export`). |
 | `data.dir` | no, repeatable | A subfolder of the site's data folder (section 4), matching `^[a-z0-9][a-z0-9_-]{0,63}$` (no `/`, no `..`). Each becomes an extra `StateDirectory=shipit-<name>/<dir>` in the unit, so systemd creates it with the right owner. Without any `data.dir`, no data folder is created: `git config` doesn't report an empty `[data]` section, so a site that keeps a single SQLite file still names a folder (e.g. `dir = db`). Rejected for `site.type = static` (no process to write to it). |
 
 Parsing rules:
 - `shipit.ini` is read from the commit with `git show <sha>:shipit.ini`, as `<name>-build`, and parsed
-  with `git config -f <file> --no-includes -z --get` / `--get-all` / `--list` (`-z`: NUL-separated
-  output, so a value can't fake extra lines). It is never sourced.
+  in one pass of `git config -f <file> --no-includes -z --list` (`-z`: NUL-separated `key\nvalue`
+  entries, so a value can't fake extra lines). It is never sourced. A syntax error fails with its line
+  number.
 - `--no-includes` is always passed, so a repo can't use `[include]` to make the parser read other files.
 - Only the sections `site`, `node`, `static` and `data` are allowed. Unknown sections or keys are
-  rejected (checked against `--list`), so a typo like `domian` fails the deploy instead of being ignored.
+  rejected (checked against `--list`, all named in one message), so a typo like `domian` fails the
+  deploy instead of being ignored. Subsections (`[site "x"]`) are unknown keys too. So is a key that
+  doesn't fit `site.type` (marked in the table): it would otherwise be silently ignored.
 - Every value is a string and is validated before use (kept from the old tool). git config turns
   escapes like `\n` in a value into real characters, so each key has its own pattern and control
-  characters are never allowed. A single-value key given more than once is rejected; only
-  `site.alias`, `site.env` and `data.dir` may repeat.
+  characters are never allowed. A key without a value (`type` alone) or with an empty one is rejected.
+  A single-value key given more than once is rejected; only `site.alias`, `site.env` and `data.dir` may
+  repeat, and none of them may repeat a value.
+- Defaults applied by the parser: `site.health` = `/`, and `node.start` for `nextjs`. The
+  `node.install` and `node.build` defaults need the repo (lockfile, `package.json`), so the build step
+  picks them.
 - Validation, including the domain clash check (5.2 A.3), runs every time a `shipit.ini` is used:
   before a build (5.2 A.3) and before every render (5.5), so a revert or rollback never renders a value
   that wasn't checked against the other sites as they are now.
@@ -149,7 +156,7 @@ time isn't supported.
 
 ```
 /etc/shipit/host.conf                 NODE_MAJOR, written once by setup
-/etc/shipit/sites/<name>.conf         REPO, TYPE, DOMAIN, ALIASES, PORT (written by deploy)
+/etc/shipit/sites/<name>.conf         REPO, TYPE, DOMAIN, ALIASES, PORT (written by deploy); root, 0644
 /etc/shipit/sites/<name>.env          secrets, edited by the admin; root:root, 600
 /etc/caddy/Caddyfile                  managed: global options + `import /etc/caddy/sites/*.caddy`
 /etc/caddy/sites/                     root:root, 0755 (setup)
@@ -173,6 +180,12 @@ time isn't supported.
 /var/lib/shipit/build.lock            one build at a time on the VPS
 /var/lib/shipit/<name>.lock           site lock, held for the whole deploy (A–D) and the whole rollback
 ```
+
+`<name>.conf` is `KEY=value` lines (`ALIASES` space-separated), blank lines and `#` comments; it's
+read as data, never sourced, and any other line, a repeated or unknown key, or an invalid value is
+refused. REPO is always there; TYPE and DOMAIN come together (C.2); a `node`/`nextjs` site has PORT.
+It holds nothing secret. It's replaced by a rename, so a deploy reading it for its clash check never
+sees half a file.
 
 Permissions: root owns `/srv/<name>` and `releases/`, so only root creates, renames or deletes release
 folders and switches `current` and `previous`. A build step can't repoint the symlinks or rename a
@@ -323,8 +336,8 @@ A. **Resolve the site** (site lock taken)
         says the site type is <x>, but this site is deployed as <type>. Changing a site's type isn't
         supported."
       - Check `site.domain` and every `site.alias` against every other site's DOMAIN and ALIASES in
-        `/etc/shipit/sites/*.conf`. A clash fails the deploy. A first deploy is given a PORT from
-        3000–3999. TYPE, DOMAIN and ALIASES are written to `<name>.conf` only in C.2, so the conf
+        `/etc/shipit/sites/*.conf`. A clash fails the deploy. A first deploy is given a PORT: the lowest
+        from 3000–3999 that no `<name>.conf` has. TYPE, DOMAIN and ALIASES are written to `<name>.conf` only in C.2, so the conf
         always describes `current`.
 B. **Build** (`build.lock` taken, after the site lock; repo commands run as `<name>-build`)
    1. Root creates `releases/<UTC>-<full sha>` and hands it to `<name>-build`, which fills it with
@@ -554,3 +567,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 21 | Caddy's access to static sites | **ACLs (`setfacl`) on the served folder only**, set after the build. Rejected: adding `caddy` to group `<name>`, which let Caddy read `repo.git`, the whole release and the env file (so one site's symlink could publish another's), and which a running Caddy only sees after a restart. |
 | 22 | Secrets during install | **None: only the build step gets the env file.** Dependencies' install scripts are third-party code. Private npm registries that need a token at install time aren't supported. |
 | 23 | Values from `shipit.ini` in rendered files | **Every key has a strict pattern; control characters are never allowed**, because git config turns `\n` into a newline and a value lands in a unit or Caddy file that root installs. |
+| 24 | Which GitHub URLs | **`https://github.com/<owner>/<repo>[.git]` only.** Owner: `[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?` (GitHub's user/org rule); repo: `[A-Za-z0-9._-]{1,100}`, not `.` or `..`. Anything else (SSH, other hosts, extra path, query, user info) is refused. |
+| 25 | Port allocation | **The lowest port in 3000–3999 that no `<name>.conf` has.** Listening sockets aren't checked: 3000–3999 is kept for shipit's sites. |
+| 26 | Keys that don't fit the type | **Refused**, not ignored: `node.start`, `site.health` and `data.dir` on `static`; `static.root` on `node`/`nextjs`. Same reason as unknown keys: a value that does nothing is a mistake. |
+| 27 | `ref` check | **`@{` is refused before `git check-ref-format --branch` runs**, because `--branch` expands `@{-N}` inside a repo. |
