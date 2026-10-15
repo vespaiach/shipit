@@ -1,8 +1,8 @@
 # shipit
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
-> milestone at a time; M0 (skeleton) and M1 (`shipit.ini` parser) are done, the commands aren't
-> implemented yet.
+> milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser) and M2 (`shipit setup`) are done.
+> `deploy` and `rollback` aren't implemented yet, and `setup --ci-key` comes with CI support (M6).
 
 ## 1. What it is
 
@@ -18,9 +18,9 @@ No prompts, so every command works over SSH from a laptop or from GitHub Actions
 ## 2. How to use it
 
 ```bash
-# once per VPS
+# once per VPS (log in with an SSH key, so setup can turn off password logins)
 ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v1.0.0.tar.gz | tar -xz && cd shipit-1.0.0 && ./install.sh'
-ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub
+ssh root@vps shipit setup
 
 # first deploy of a site, by hand
 ssh root@vps shipit deploy https://github.com/<you>/blog blog
@@ -29,6 +29,15 @@ ssh root@vps shipit deploy https://github.com/<you>/blog blog
 ssh root@vps shipit deploy blog [ref]
 ssh root@vps shipit rollback blog
 ```
+
+`shipit setup` is safe to re-run; a re-run changes no file that's already right. It checks the OS
+(Debian 13+ or Ubuntu 26.04+), adds the Caddy and NodeSource apt repos and installs the packages
+below (the Node.js LTS major is looked up once and kept in `/etc/shipit/host.conf`), installs a
+pinned corepack, creates shipit's folders, writes `/etc/caddy/Caddyfile`, turns on ufw (SSH ports
+from `sshd -T`, 80, 443/tcp, 443/udp), fail2ban and unattended-upgrades, and turns off SSH password
+logins, but only if root has a key in `authorized_keys` and you logged in with it. Its last lines are
+the VPS host keys: replace `<host>` and save them as the GitHub secret `VPS_KNOWN_HOSTS`. Setting up
+the `ci` user's keys (`shipit setup --ci-key <name> <key file>`) comes with CI support.
 
 Each repo has a `shipit.ini` at its root:
 

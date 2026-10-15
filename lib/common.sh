@@ -11,6 +11,25 @@ SHIPIT_VAR=/var/lib/shipit
 # Where each site's code lives: $SRV_ROOT/<name>/{repo.git,releases,current,previous}.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 SRV_ROOT=/srv
+# Caddy's config (Caddyfile, sites/<name>.caddy) and the per-site access logs.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+CADDY_ETC=/etc/caddy
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+LOG_ROOT=/var/log/shipit
+# Host files setup reads or writes (plan §5.1).
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+OS_RELEASE=/etc/os-release
+# apt's config: sources.list.d, preferences.d, apt.conf.d and keyrings.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+APT_ETC=/etc/apt
+# sshd's config: sshd_config.d and the host keys (ssh_host_*_key.pub).
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+SSH_ETC=/etc/ssh
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+FAIL2BAN_ETC=/etc/fail2ban
+# Root's home, for .ssh/authorized_keys.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+ROOT_HOME=/root
 
 # Where render's templates live: templates/ next to lib/, in a checkout and when installed.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
@@ -69,6 +88,12 @@ install_if_changed() {
     return 1
   fi
   install -m "$3" "$1" "$2"
+}
+
+# is_shipit_file <file>: one of its first three lines is the managed marker, as a # or // comment.
+# grep reads everything (no -q), so head never gets SIGPIPE under pipefail.
+is_shipit_file() {
+  head -n 3 -- "$1" 2>/dev/null | grep -E '^(#|//) managed by shipit' >/dev/null
 }
 
 # atomic_link <target> <link>: points link at target in one rename(2), so a reader sees either the

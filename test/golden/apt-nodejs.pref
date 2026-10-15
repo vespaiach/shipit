@@ -1,0 +1,4 @@
+# managed by shipit: take nodejs from NodeSource, even if the distribution has a newer build.
+Package: nodejs
+Pin: origin deb.nodesource.com
+Pin-Priority: 600

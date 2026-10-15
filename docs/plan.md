@@ -31,7 +31,7 @@ Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state fol
 | Package | Why |
 |---|---|
 | `caddy` | Web server, TLS, reverse proxy. |
-| `nodejs` | Builds and runs sites (npm comes with it). Node 25+ no longer bundles corepack, so setup installs a pinned `corepack` with npm and runs `corepack enable`, for pnpm/yarn. |
+| `nodejs` | Builds and runs sites (npm comes with it). Node 25+ no longer bundles corepack, so setup installs a pinned `corepack` (0.36.0, decision 28) with npm and runs `corepack enable`, for pnpm/yarn. |
 | `jq` | Reads the Node release index during `setup`, and `package.json` scripts during `deploy` (for the `node.build` default). |
 | `curl` | Downloads apt keys, health checks. |
 | `git` | Fetches repos. |
@@ -255,18 +255,27 @@ Users (each site gets two system accounts, neither can log in):
 
 Idempotent: re-running changes no file whose content is already right.
 
-1. Check the OS (section 1) and that we're root.
+1. Check the OS (section 1, decision 30) and that we're root.
 2. Add the Caddy and NodeSource apt repos (signed-by keyrings), install the packages in section 2,
-   then `npm install -g corepack@<pinned version>` and `corepack enable`.
+   then `npm install -g corepack@<pinned version>` and `corepack enable`. The keys are downloaded
+   once into `/etc/apt/keyrings/` (`caddy-stable-archive-keyring.gpg`, `nodesource.gpg`); the
+   sources are `/etc/apt/sources.list.d/caddy-stable.list` and `nodesource.list` (the names Caddy's
+   and NodeSource's own instructions use, so a repo added by hand is never listed twice), and
+   `/etc/apt/preferences.d/shipit-nodejs` pins `nodejs` to NodeSource. A source file shipit didn't
+   write is left alone, with a message. The NodeSource line uses NODE_MAJOR from `host.conf`, written
+   on the first run. The npm install is skipped when `corepack --version` already prints the pin.
 3. Create `ci` (shell `/bin/sh`); create `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`,
    `/srv`, `/var/log/shipit` (root:root, 0755).
-4. Write `/etc/caddy/Caddyfile` (`import /etc/caddy/sites/*.caddy`), validate, reload Caddy. Caddy
-   files are always validated as `caddy` (`runuser -u caddy -- caddy validate`): validating opens the
-   log files, and run as root it would create them owned by root, breaking the next reload.
+4. Write `/etc/caddy/Caddyfile` (`import /etc/caddy/sites/*.caddy`), validate, reload Caddy (only if
+   it changed). Caddy files are always validated as `caddy` (`runuser -u caddy -- caddy validate`):
+   validating opens the log files, and run as root it would create them owned by root, breaking the
+   next reload. The Caddyfile is replaced only if it's missing, shipit's, or Caddy's package default
+   untouched (dpkg's conffile md5); otherwise setup stops and says to move it away.
 5. ufw: allow the ports sshd actually listens on (read from `sshd -T`, so a non-22 port doesn't lock
-   you out), 80/tcp, 443/tcp and 443/udp; enable. fail2ban: enable the `sshd` jail with
-   `backend = systemd`.
-   unattended-upgrades: enable.
+   you out), 80/tcp, 443/tcp and 443/udp; default deny incoming, allow outgoing; enable
+   (`ufw --force enable`). fail2ban: enable the `sshd` jail with `backend = systemd`
+   (`/etc/fail2ban/jail.d/shipit-sshd.conf`; fail2ban reloaded if it changed).
+   unattended-upgrades: enable (`/etc/apt/apt.conf.d/52shipit-auto-upgrades`, decision 29).
 6. For each `--ci-key <name> <file>` (repeatable; re-run setup to add a site's key later; the site
    doesn't have to exist yet): the key must be exactly one line, accepted by `ssh-keygen -l -f`, and
    made only of a key type, base64 and an optional comment, so it can't add a second line or its own
@@ -280,7 +289,10 @@ Idempotent: re-running changes no file whose content is already right.
    `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`), check it with `sshd -t`,
    install, `systemctl reload ssh`. Done **only** if root has a key in `authorized_keys` and the current
    session logged in with a key (sshd's journal shows `Accepted publickey` for this session); otherwise
-   setup skips this step and prints why, so it can never lock you out.
+   setup skips this step and prints why, so it can never lock you out. "This session" is any ancestor
+   of the setup process: the `sshd`/`sshd-session` pid that logged the login is one of them. If the
+   journal can't be read, the step is skipped too. `sshd -t -f <temp copy>` checks the drop-in on its
+   own (decision 31).
 8. Print the host key lines for `VPS_KNOWN_HOSTS`: one known_hosts line per
    `/etc/ssh/ssh_host_*_key.pub`, with `<host>` as a placeholder for the name or IP CI will use, then:
    "Replace <host> with the address CI connects to (use [host]:port if SSH isn't on 22), and save these
@@ -504,6 +516,12 @@ name, which only root sets and the build user can't rename, and the commit is pi
 - `sshd.conf` (the drop-in), `sudoers-ci`, `authorized_keys` line (one per site key),
   `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's SSH host keys, copied, not
   rendered).
+- `apt-caddy.list`, `apt-nodesource.list` (NODE_MAJOR), `apt-nodejs.pref` (the NodeSource pin),
+  `apt-auto-upgrades` (unattended-upgrades on).
+
+Every template starts with a `# managed by shipit` line (`//` in apt.conf files). Setup overwrites a
+file only when one of its first three lines is that marker, or when it's missing (or, for the
+Caddyfile, Caddy's untouched default).
 
 Each template gets a golden file and a unit test (kept from the old tool).
 
@@ -571,3 +589,10 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 25 | Port allocation | **The lowest port in 3000–3999 that no `<name>.conf` has.** Listening sockets aren't checked: 3000–3999 is kept for shipit's sites. |
 | 26 | Keys that don't fit the type | **Refused**, not ignored: `node.start`, `site.health` and `data.dir` on `static`; `static.root` on `node`/`nextjs`. Same reason as unknown keys: a value that does nothing is a mistake. |
 | 27 | `ref` check | **`@{` is refused before `git check-ref-format --branch` runs**, because `--branch` expands `@{-N}` inside a repo. |
+| 28 | corepack version | **Pinned to 0.36.0** (`COREPACK_VERSION` in `lib/setup.sh`; the latest on npm when M2 was written). Bumped by hand, with a shipit release. setup skips `npm install -g` when `corepack --version` already prints it, and always runs `corepack enable`. |
+| 29 | Turning on unattended-upgrades | **A shipit file, `/etc/apt/apt.conf.d/52shipit-auto-upgrades`** (`Update-Package-Lists` and `Unattended-Upgrade` = 1), checked with `apt-config -c <temp copy> dump`. It's read after Debian's `20auto-upgrades`, so it wins without shipit touching that file (which isn't marked as shipit's). Rejected: `dpkg-reconfigure -f noninteractive unattended-upgrades`, which goes through debconf and rewrites `20auto-upgrades`. The package's `50unattended-upgrades` (security origins only) is left as shipped. |
+| 30 | OS version check | **`/etc/os-release` is read as data** (only `ID` and `VERSION_ID`, quotes stripped), never sourced. Versions compare number by number (`26.10 >= 26.04`, `27.04 >= 26.10`). Debian's `VERSION_ID` must be a plain integer, Ubuntu's `YY.MM`; a missing `VERSION_ID` (Debian testing/sid) or any other `ID` (including derivatives such as Mint) is refused. |
+| 31 | Checking the sshd drop-in | **`sshd -t -f <temp copy>`**, the drop-in on its own as the whole config: it checks the drop-in's syntax and values without depending on the rest of `/etc/ssh`. sshd keeps the first value it reads and Debian's and Ubuntu's `sshd_config` include `sshd_config.d/*.conf` first, so `10-shipit.conf` wins over later drop-ins such as cloud-init's `50-cloud-init.conf`. |
+| 32 | ufw defaults | **Deny incoming, allow outgoing**, then allow sshd's ports (each `port N` line of `sshd -T`, as `N/tcp`; any malformed `port` line stops setup before ufw is touched), 80/tcp, 443/tcp and 443/udp, then `ufw --force enable`. Re-running is safe: ufw skips rules it already has. Ports opened by hand are kept. |
+| 33 | Caddyfile global options | **Only `admin localhost:2019`** (Caddy's default, written out so the reload path is explicit). No ACME email: Caddy gets certificates without one. |
+| 34 | Test seams for setup | **Plain constants in `lib/common.sh`**: `OS_RELEASE` (`/etc/os-release`), `APT_ETC` (`/etc/apt`), `CADDY_ETC` (`/etc/caddy`), `LOG_ROOT` (`/var/log/shipit`), `SSH_ETC` (`/etc/ssh`: the drop-in folder and host keys), `FAIL2BAN_ETC` (`/etc/fail2ban`) and `ROOT_HOME` (`/root`), next to `SHIPIT_ETC`, `SHIPIT_VAR` and `SRV_ROOT`. Tests point them at a temp dir and stub `apt-get`, `systemctl`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`, `chown` and the rest through `PATH`. |
