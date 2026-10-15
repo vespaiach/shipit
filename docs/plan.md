@@ -158,7 +158,7 @@ a token at install time isn't supported.
 
 ```
 /etc/shipit/host.conf                 NODE_MAJOR, written once by setup
-/etc/shipit/sites/<name>.conf         REPO, TYPE, DOMAIN, ALIASES, PORT (written by deploy); root, 0644
+/etc/shipit/sites/<name>.conf         REPO, TYPE, DOMAIN, ALIASES, PORT (written by deploy and rollback); root, 0644
 /etc/shipit/sites/<name>.env          secrets, edited by the admin; root:root, 600
 /etc/caddy/Caddyfile                  managed: global options + `import /etc/caddy/sites/*.caddy`
 /etc/caddy/sites/                     root:root, 0755 (setup)
@@ -379,11 +379,11 @@ C. **Switch** (site lock still held)
    1. Remember where `previous` points, then `previous` → old `current`; `current` → new release (both
       atomic).
    2. Render the Caddy file and unit from the `shipit.ini` of the new `current` (section 5.5) and
-      validate both (decision 54) before installing either, then write TYPE, DOMAIN and ALIASES to
-      `<name>.conf`. The unit goes in first: `daemon-reload` if it changed (including `data.dir`),
-      and `systemctl enable` it so the site comes back after a reboot (on every deploy: it's
-      idempotent, decision 55). Then reload (never restart) Caddy if the Caddy file changed. If
-      rendering, validating or installing fails, revert (step 4) and exit non-zero.
+      validate both (decision 54) before installing either. The unit goes in first: `daemon-reload`
+      if it changed (including `data.dir`), and `systemctl enable` it so the site comes back after a
+      reboot (on every deploy: it's idempotent, decision 55). Then reload (never restart) Caddy if
+      the Caddy file changed. Then write TYPE, DOMAIN and ALIASES to `<name>.conf`. If rendering,
+      validating or installing fails, revert (step 4) and exit non-zero.
    3. Node/Next.js: restart `shipit-<name>` (`nextjs`: stop, `systemctl clean --what=cache`, start, so
       a release never sees another release's cache), then poll `http://127.0.0.1:$PORT$health` with
       `Host: $domain` every second for up to 60 s (decision 56). A failed restart counts as a failed
@@ -578,9 +578,11 @@ name, which only root sets and the build user can't rename, and the commit is pi
 - `apt-caddy.list`, `apt-nodesource.list` (NODE_MAJOR), `apt-nodejs.pref` (the NodeSource pin),
   `apt-auto-upgrades` (unattended-upgrades on).
 
-Every template starts with a `# managed by shipit` line (`//` in apt.conf files). Setup overwrites a
-file only when one of its first three lines is that marker, or when it's missing (or, for the
-Caddyfile, Caddy's untouched default).
+Every file rendered from these templates starts with a `# managed by shipit` line (`//` in apt.conf
+files): each template that begins a file carries it, but not the parts rendered after
+`site-log.caddy` or `site.service` (decisions 46, 51), nor `authorized_keys`, whose marker setup
+writes as the file's first line (decision 66). Setup overwrites a file only when one of its first three lines is that marker, or
+when it's missing (or, for the Caddyfile, Caddy's untouched default).
 
 Each template gets a golden file and a unit test (kept from the old tool).
 
@@ -616,7 +618,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
 | M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
 | M6 | `remote` + CI user + GitHub Actions example (done) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
-| M7 | README, CLAUDE.md rewritten | review |
+| M7 | README, CLAUDE.md rewritten (done) | review |
 
 ## 9. Decisions
 
@@ -630,7 +632,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 6 | First deploy | **By hand, as root.** CI (`ci` user, `shipit remote`) only redeploys and rolls back registered sites. |
 | 7 | SSH hardening | **On**, guarded by the key-login check in 5.1 step 7. |
 | 8 | Downtime on Node/Next.js deploy | **Accepted**: a ~1–3 s gap while the unit restarts. No blue/green. |
-| 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/log/shipit/<name>`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
+| 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/cache/shipit-<name>`, `/var/log/shipit/<name>`, `/var/lib/shipit/<name>.lock`, the site's line in `~ci/.ssh/authorized_keys`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
 | 10 | Rewrite approach | **Fresh rewrite** on a new branch; keep the old tool's helpers listed in section 7. |
 | 11 | Who runs shipit | **Root.** Repo code only ever runs as `<name>-build` (build) or `<name>` (runtime). Running shipit itself as an unprivileged user was considered and rejected: it needs two privilege modes, an extra command and sudo rules for restarts anyway, and the CI path is already limited by the forced command plus strict `shipit remote` parsing. |
 | 12 | Repo config format | **`shipit.ini`, in git's config dialect.** It allows comments, is easy to read, adds no dependency (`git` is already installed), and `git config` is a strict, well-specified parser that exits non-zero on bad syntax. Considered: JSON (no comments) and YAML (needs python3 + yq, has YAML 1.1 quirks, and is a bigger parser to run on untrusted input). |
@@ -662,7 +664,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 38 | Transport after the first deploy | **SSH if `/srv/<name>/.ssh/id_ed25519` exists, else HTTPS**, without probing. Before the first success, a repo that answers over HTTPS is public and a key left by an earlier try is deleted, so a public site never switches to SSH. A public repo that later turns private: create the key as `<name>-build` (`ssh-keygen -t ed25519 -N '' -f /srv/<name>/.ssh/id_ed25519`) and add it to GitHub. SSH runs as `ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<templates>/github_known_hosts -o GlobalKnownHostsFile=/dev/null`; the key's comment is `shipit-<name>`. |
 | 39 | PORT for static sites | **None.** Only `node`/`nextjs` sites get a PORT (M4); `conf_parse` already allows a static site without one. |
 | 40 | Release folder name | **`<date -u +%Y%m%dT%H%M%SZ>-<full sha>`**, so names sort by time. Root makes it with `mkdir` (no `-p`); if the name is taken (the same commit within one second), it waits a second and tries once more. `current` and `previous` are relative links (`releases/<dir>`); a link that isn't one is refused rather than followed. |
-| 41 | Install and build | **Defaults are read from the commit as data**: `git ls-tree --name-only <sha>` for lockfiles (`package-lock.json` → `npm ci`, else `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, else `yarn.lock` → `yarn install --immutable`, else `package.json` → `npm install`, else no install) and `git show <sha>:package.json` piped to `jq` for `.scripts.build`. Each command runs as `runuser -u <name>-build -- env -i HOME=/srv/<name>/home PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8`, with `umask 027`, as `sh -c "<cmd>"` in the release. Install's stdin is `/dev/null`; build's is the env file, read by a small sh wrapper that exports it and runs the build with stdin closed. |
+| 41 | Install and build | **Defaults are read from the commit as data**: `git ls-tree --name-only <sha>` for lockfiles (`package-lock.json` → `npm ci`, else `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, else `yarn.lock` → `yarn install --immutable`, else `package.json` → `npm install`, else no install) and `git show <sha>:package.json` piped to `jq` for `.scripts.build`. Each command runs as `runuser -u <name>-build -- env -i HOME=/srv/<name>/home PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8`, with `umask 027`, as `sh -c "<cmd>"` in the release. Install's stdin is `/dev/null`; build's is the env file, read by a small sh wrapper that exports it and runs the build with stdin from `/dev/null`. |
 | 42 | Env file format | **`KEY=value` lines (KEY `^[A-Za-z_][A-Za-z0-9_]*$`, at the start of the line), blank lines and `#`/`;` comments.** The value is literal, except that spaces and tabs around it, then one pair of matching `"` or `'` around all of it, are removed; no escapes, no `export`, no line continuations. That's the part of systemd's `EnvironmentFile=` syntax both read the same way. Any other line fails the deploy, naming the line, before the build. |
 | 43 | Symlinks in a static root | **Every `find -P <root> -type l` is resolved by `path_resolve`** (bash and `readlink`, like `realpath -m`, which macOS lacks; more than 40 links is a loop and refused) and must stay inside `<root>`. `<root>` itself, and every folder on the way to it, must not be a symlink. The check runs after root takes the release back, so the build user can't change the tree meanwhile. |
 | 44 | Static site headers | **`X-Content-Type-Options nosniff`, `Referrer-Policy strict-origin-when-cross-origin`, `X-Frame-Options SAMEORIGIN`, `-Server`.** No HSTS: browsers keep it for its max-age, after the site's config (or the site) has changed, and Caddy already redirects HTTP to HTTPS. No CSP: it depends on the site. |
