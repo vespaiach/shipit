@@ -434,7 +434,6 @@ site_apply_config() {
   fi
   sha=$(release_sha "${target#releases/}") || return 1
   site_ini "$sha" "$DEPLOY_TMP/current.ini" || return 1
-  ini_check_name "$SITE" no || return 1
   ini_check_clash "$SITE" || return 1
   if [ "$INI_TYPE" = static ]; then
     render_site_caddy site-static.caddy ROOT >"$caddy" || return 1
@@ -590,7 +589,6 @@ deploy_fetch() {
     || die "Can't find ${REF:-$branch} in $CONF_REPO. Use a branch, a tag, or the full SHA of a commit on one."
 
   site_ini "$SHA" "$DEPLOY_TMP/shipit.ini" || die "Fix shipit.ini, then run the deploy again."
-  ini_check_name "$SITE" "$first" || exit 1
   [ "$first" = yes ] || ini_check_type "$CONF_TYPE" || exit 1
   ini_check_clash "$SITE" || exit 1
   if [ -e "$env" ]; then

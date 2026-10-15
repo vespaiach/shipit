@@ -30,10 +30,10 @@ deploy_ok() {
 # static_releases: rel1 serves out/ without aliases; rel2 (current) serves dist/ with an alias.
 static_releases() {
   host
-  commit shipit.ini "$(ini blog blog.example.com | sed 's/root = dist/root = out/')" out/index.html v1 >/dev/null
+  commit shipit.ini "$(ini blog.example.com | sed 's/root = dist/root = out/')" out/index.html v1 >/dev/null
   deploy_ok https://github.com/me/blog blog
   rel1=$(current)
-  commit shipit.ini "$(ini blog blog.example.com 'alias = www.blog.example.com')" dist/index.html v2 >/dev/null
+  commit shipit.ini "$(ini blog.example.com 'alias = www.blog.example.com')" dist/index.html v2 >/dev/null
   deploy_ok blog
   rel2=$(current)
 }
@@ -181,10 +181,10 @@ EOF
 
 @test "rollback of a nextjs site: stop, empty the cache, start" {
   host
-  commit shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
   deploy_ok https://github.com/me/blog blog
   rel1=$(current)
-  commit shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = nextjs\n\thealth = /api/health' >/dev/null
+  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs\n\thealth = /api/health' >/dev/null
   deploy_ok blog
   : >"$calls"
   run cmd_rollback blog
@@ -234,10 +234,10 @@ EOF
 
 @test "rollback to a release whose domain now clashes with another site is refused and swapped back" {
   host
-  commit shipit.ini "$(ini blog blog.example.com 'alias = shared.example.com')" >/dev/null
+  commit shipit.ini "$(ini blog.example.com 'alias = shared.example.com')" >/dev/null
   deploy_ok https://github.com/me/blog blog
   rel1=$(current)
-  commit shipit.ini "$(ini blog blog.example.com)" >/dev/null
+  commit shipit.ini "$(ini blog.example.com)" >/dev/null
   deploy_ok blog
   rel2=$(current)
   caddy_before=$(caddy_file)
@@ -280,7 +280,7 @@ EOF
   git -C "$repo" cat-file -e "$unpinned^{commit}"
   # Force-push: main now holds only an unrelated commit; fetch --prune as deploy does, then gc.
   git -C "$remote" checkout -q --orphan rewritten
-  commit shipit.ini "$(ini blog blog.example.com)" >/dev/null
+  commit shipit.ini "$(ini blog.example.com)" >/dev/null
   git -C "$remote" branch -q -D main
   git -C "$remote" branch -q -m main
   git -C "$repo" fetch -q --prune "$remote" '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'

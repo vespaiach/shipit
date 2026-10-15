@@ -84,8 +84,8 @@ file away (an apt source file is left alone instead).
 Each repo has a `shipit.ini` at its root, in git's config syntax. A full example:
 
 ```ini
+# deployed as: shipit deploy https://github.com/<owner>/<repo> blog
 [site]
-name = blog
 domain = blog.example.com
 alias = www.blog.example.com
 type = nextjs
@@ -106,9 +106,8 @@ dir = db
 A minimal one per type:
 
 ```ini
-# static: build with the defaults, serve dist/
+# static: build with the defaults, serve dist/ (deployed as: shipit deploy <url> docs)
 [site]
-name = docs
 domain = docs.example.com
 type = static
 
@@ -117,9 +116,8 @@ root = dist
 ```
 
 ```ini
-# node: start is required
+# node: start is required (deployed as: shipit deploy <url> api)
 [site]
-name = api
 domain = api.example.com
 type = node
 
@@ -131,16 +129,14 @@ dir = uploads
 ```
 
 ```ini
-# nextjs: every command has a default
+# nextjs: every command has a default (deployed as: shipit deploy <url> blog)
 [site]
-name = blog
 domain = blog.example.com
 type = nextjs
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
-| `site.name` | yes | The site's name: a lowercase letter, then up to 24 lowercase letters, digits or `-`. Must match the name you deploy it as. Can't change later. |
 | `site.domain` | yes | The site's hostname, lowercase. No other site may use it. |
 | `site.alias` | no, repeatable | Another hostname, redirected (308) to `site.domain`. |
 | `site.type` | yes | `static`, `node` or `nextjs`. Can't change after the first deploy. |
@@ -200,7 +196,7 @@ it turns private later, create the key by hand and add its `.pub` to GitHub:
 2. On a first deploy, creates the users `<name>` and `<name>-build`, `/srv/<name>/` and
    `/etc/shipit/sites/<name>.conf`.
 3. As `<name>-build`, fetches the repo's branches and tags, resolves the ref, and checks
-   `shipit.ini` at that commit: its name and type must match the site's, its domain and aliases must
+   `shipit.ini` at that commit: its type must match the site's, its domain and aliases must
    not be used by another site, the env file must parse and hold every `site.env` key.
 4. Builds, one site at a time on the VPS ("Another site is building; waiting."): a new folder
    `releases/<UTC time>-<sha>/` gets the commit's files, then the install and build commands run in
@@ -219,7 +215,7 @@ failed health check, switches back ("Deploy failed health check; still serving <
 first deploy removes what it installed and prints "First deploy of docs failed; nothing is served.";
 it keeps the users and the port, so fix the problem and run the same command again.
 
-A site's name and type can't change after its first deploy. To rename it or change its type, remove
+A site's name is the one you gave on its first deploy (`shipit deploy <repo-url> <name>`); `shipit.ini` doesn't hold it. The name and the type can't change after that. To rename it or change its type, remove
 it ([Removing a site](#removing-a-site)) and deploy it again.
 
 ## Secrets

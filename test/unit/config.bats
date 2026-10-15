@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# lib/config.sh: shipit.ini parsing and validation (plan §3), the name/type/clash checks of plan §5.2
+# lib/config.sh: shipit.ini parsing and validation (plan §3), the type/clash checks of plan §5.2
 # A.3, the ref and repo URL rules, and the site configs in $SHIPIT_ETC/sites (plan §4).
 
 setup() {
@@ -25,17 +25,16 @@ refused() {
 }
 
 # site_ini <section.key> <value>: writes $BATS_TEST_TMPDIR/s.ini, a nextjs site with that key set (or,
-# for site.name, site.domain and site.type, replaced). The value is quoted, so git turns \t or \n into
+# for site.domain and site.type, replaced). The value is quoted, so git turns \t or \n into
 # the real character.
 site_ini() {
-  local name=blog domain=blog.example.com type=nextjs extra=''
+  local domain=blog.example.com type=nextjs extra=''
   case "$1" in
-    site.name) name=$2 ;;
     site.domain) domain=$2 ;;
     site.type) type=$2 ;;
     *) extra=$(printf '[%s]\n%s = "%s"' "${1%%.*}" "${1#*.}" "$2") ;;
   esac
-  printf '[site]\nname = "%s"\ndomain = "%s"\ntype = "%s"\n%s\n' "$name" "$domain" "$type" "$extra" \
+  printf '[site]\ndomain = "%s"\ntype = "%s"\n%s\n' "$domain" "$type" "$extra" \
     >"$BATS_TEST_TMPDIR/s.ini"
 }
 
@@ -50,7 +49,7 @@ conf() {
   run ini_load "$FIX/full.ini"
   [ "$status" -eq 0 ] && [ -z "$output" ]
   ini_load "$FIX/full.ini"
-  [ "$INI_NAME" = blog ] && [ "$INI_DOMAIN" = blog.example.com ] && [ "$INI_TYPE" = nextjs ]
+  [ "$INI_DOMAIN" = blog.example.com ] && [ "$INI_TYPE" = nextjs ]
   [ "${INI_ALIASES[*]}" = www.blog.example.com ]
   [ "$INI_HEALTH" = /api/health ] && [ "$INI_HEALTH_STRICT" = 1 ]
   [ "${INI_ENV[*]}" = 'DATABASE_URL NEXT_PUBLIC_API' ]
@@ -62,7 +61,7 @@ conf() {
 
 @test "ini: the minimal static example" {
   ini_load "$FIX/static.ini"
-  [ "$INI_NAME" = docs ] && [ "$INI_DOMAIN" = docs.example.com ] && [ "$INI_TYPE" = static ]
+  [ "$INI_DOMAIN" = docs.example.com ] && [ "$INI_TYPE" = static ]
   [ "$INI_ROOT" = dist ]
   [ "${#INI_ALIASES[@]}" -eq 0 ] && [ "${#INI_ENV[@]}" -eq 0 ] && [ "${#INI_DIRS[@]}" -eq 0 ]
   [ -z "$INI_INSTALL" ] && [ -z "$INI_BUILD" ] && [ -z "$INI_START" ]
@@ -85,7 +84,7 @@ conf() {
 
 @test "ini: section and key names are case-insensitive" {
   ini_load "$FIX/uppercase.ini"
-  [ "$INI_NAME" = blog ] && [ "$INI_DOMAIN" = blog.example.com ]
+  [ "$INI_DOMAIN" = blog.example.com ]
 }
 
 @test "ini: a second load starts from scratch" {
@@ -97,11 +96,11 @@ conf() {
 # ---- Structure -----------------------------------------------------------------------------------
 
 @test "ini: a syntax error fails with the line" {
-  refused syntax-error 'shipit.ini has a syntax error on line 3.'
+  refused syntax-error 'shipit.ini has a syntax error on line 2.'
 }
 
 @test "ini: an unknown key is refused, naming it" {
-  refused unknown-key 'shipit.ini has unknown keys: site.domian. Use only site.name, site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+  refused unknown-key 'shipit.ini has unknown keys: site.domian. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
 }
 
 @test "ini: an unknown section is refused" {
@@ -114,11 +113,15 @@ conf() {
   [ "$status" -eq 1 ] && [[ $output == 'shipit.ini has unknown keys: site.name site.domain. '* ]]
 }
 
+@test "ini: site.name is refused as an unknown key" {
+  refused site-name 'shipit.ini has unknown keys: site.name. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+}
+
 @test "ini: [include] is refused and never read" {
   # Read with includes, included.ini would supply the missing static.root and site.evil.
   run git config -f "$FIX/include.ini" --includes --list
   [[ $output == *static.root=dist* ]]
-  refused include 'shipit.ini has unknown keys: include.path. Use only site.name, site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+  refused include 'shipit.ini has unknown keys: include.path. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
 }
 
 @test "ini: a single-value key given twice is refused" {
@@ -130,12 +133,12 @@ conf() {
 }
 
 @test "ini: required keys" {
-  printf '[site]\nname = blog\ntype = nextjs\n' >"$BATS_TEST_TMPDIR/s.ini"
+  printf '[site]\ntype = nextjs\n' >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$status" -eq 1 ] && [ "$output" = 'shipit.ini needs site.domain.' ]
   : >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
-  [ "$status" -eq 1 ] && [ "$output" = 'shipit.ini needs site.name.' ]
+  [ "$status" -eq 1 ] && [ "$output" = 'shipit.ini needs site.domain.' ]
   refused static-no-root 'A static site needs static.root in shipit.ini.'
   refused node-no-start 'A node site needs node.start in shipit.ini.'
 }
@@ -158,7 +161,7 @@ conf() {
 
 @test "ini: control characters are refused in every key" {
   local key
-  for key in site.name site.domain site.alias site.type site.health site.env node.install node.build \
+  for key in site.domain site.alias site.type site.health site.env node.install node.build \
     node.start static.root data.dir; do
     site_ini "$key" 'a\tb'
     run ini_load "$BATS_TEST_TMPDIR/s.ini"
@@ -183,7 +186,7 @@ conf() {
   refused root-dotdot "Invalid static.root '../x' in shipit.ini: use a folder inside the release, like dist or build/out, with no . or .. part."
   local root
   for root in . .. ./dist dist/. a/../b /dist dist/ 'a b' a//b; do
-    printf '[site]\nname = d\ndomain = d.example.com\ntype = static\n[static]\nroot = "%s"\n' "$root" \
+    printf '[site]\ndomain = d.example.com\ntype = static\n[static]\nroot = "%s"\n' "$root" \
       >"$BATS_TEST_TMPDIR/s.ini"
     run ini_load "$BATS_TEST_TMPDIR/s.ini"
     [ "$status" -eq 1 ] || {
@@ -192,7 +195,7 @@ conf() {
     }
   done
   for root in dist build/out .output/public a..b v1.2; do
-    printf '[site]\nname = d\ndomain = d.example.com\ntype = static\n[static]\nroot = "%s"\n' "$root" \
+    printf '[site]\ndomain = d.example.com\ntype = static\n[static]\nroot = "%s"\n' "$root" \
       >"$BATS_TEST_TMPDIR/s.ini"
     ini_load "$BATS_TEST_TMPDIR/s.ini" || {
       echo "refused $root"
@@ -207,7 +210,7 @@ conf() {
 
 @test "ini: other per-key patterns" {
   local kv
-  for kv in site.name=Blog site.name=abcdefghijklmnopqrstuvwxyz site.domain=localhost site.type=php \
+  for kv in site.domain=localhost site.type=php \
     site.alias=-x.example.com site.env=1X site.env=A-B site.health=api 'site.health=/a?b'; do
     site_ini "${kv%%=*}" "${kv#*=}"
     run ini_load "$BATS_TEST_TMPDIR/s.ini"
@@ -229,48 +232,32 @@ conf() {
 
 @test "ini: an alias equal to the domain, or given twice, is refused" {
   refused alias-is-domain 'site.alias blog.example.com in shipit.ini is the same as site.domain; remove the alias.'
-  printf '[site]\nname = b\ndomain = b.example.com\ntype = nextjs\nalias = w.example.com\nalias = w.example.com\n' \
+  printf '[site]\ndomain = b.example.com\ntype = nextjs\nalias = w.example.com\nalias = w.example.com\n' \
     >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$status" -eq 1 ] && [ "$output" = 'site.alias = w.example.com appears more than once in shipit.ini.' ]
 }
 
 @test "ini: keys that don't fit the type are refused" {
-  printf '[site]\nname = d\ndomain = d.example.com\ntype = static\nhealth = /\n[static]\nroot = dist\n' \
+  printf '[site]\ndomain = d.example.com\ntype = static\nhealth = /\n[static]\nroot = dist\n' \
     >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = "site.health isn't allowed for a static site: there's no process to run." ]
-  printf '[site]\nname = d\ndomain = d.example.com\ntype = static\n[node]\nstart = x\n[static]\nroot = dist\n' \
+  printf '[site]\ndomain = d.example.com\ntype = static\n[node]\nstart = x\n[static]\nroot = dist\n' \
     >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = "node.start isn't allowed for a static site: there's no process to run." ]
-  printf '[site]\nname = b\ndomain = b.example.com\ntype = nextjs\n[static]\nroot = out\n' >"$BATS_TEST_TMPDIR/s.ini"
+  printf '[site]\ndomain = b.example.com\ntype = nextjs\n[static]\nroot = out\n' >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = 'static.root is only for static sites; remove it from shipit.ini.' ]
   # A static site may still have node.install and node.build.
-  printf '[site]\nname = d\ndomain = d.example.com\ntype = static\n[node]\nbuild = vite build\n[static]\nroot = dist\n' \
+  printf '[site]\ndomain = d.example.com\ntype = static\n[node]\nbuild = vite build\n[static]\nroot = dist\n' \
     >"$BATS_TEST_TMPDIR/s.ini"
   ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$INI_BUILD" = 'vite build' ]
 }
 
-# ---- Name and type (plan §5.2 A.3) ---------------------------------------------------------------
-
-@test "name: a first deploy under another name is refused" {
-  ini_load "$FIX/full.ini"
-  run ini_check_name blog yes
-  [ "$status" -eq 0 ] && [ -z "$output" ]
-  run ini_check_name myblog yes
-  [ "$status" -eq 1 ]
-  [ "$output" = 'shipit.ini says the site name is blog, but you asked to deploy it as myblog.' ]
-}
-
-@test "name: renaming on a later deploy is refused" {
-  ini_load "$FIX/full.ini"
-  run ini_check_name myblog no
-  [ "$status" -eq 1 ]
-  [ "$output" = "shipit.ini says the site name is blog, but this repo is deployed as myblog. Renaming a site isn't supported; change site.name back." ]
-}
+# ---- Type (plan §5.2 A.3) ---------------------------------------------------------------
 
 @test "type: a changed type is refused" {
   ini_load "$FIX/full.ini"

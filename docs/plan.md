@@ -46,10 +46,11 @@ Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state fol
 
 ## 3. Repo config: `shipit.ini`
 
+The site's name isn't in `shipit.ini`: it comes from the command line on the first deploy (decision 67).
+
 ```ini
 # shipit.ini
 [site]
-name = blog
 domain = blog.example.com
 alias = www.blog.example.com
 type = nextjs
@@ -75,7 +76,6 @@ Minimal examples, one per type:
 ```ini
 # static: build with the defaults, serve dist/
 [site]
-name = docs
 domain = docs.example.com
 type = static
 
@@ -86,7 +86,6 @@ root = dist
 ```ini
 # node: start is required
 [site]
-name = api
 domain = api.example.com
 type = node
 
@@ -100,14 +99,12 @@ dir = uploads
 ```ini
 # nextjs: every command has a default
 [site]
-name = blog
 domain = blog.example.com
 type = nextjs
 ```
 
 | Key | Required | Meaning |
 |---|---|---|
-| `site.name` | yes | Site name: `^[a-z][a-z0-9-]{0,24}$`, at most 25 characters, so `<name>-build` fits Linux's 32-character username limit. Used for folders, users, unit, Caddy file. Must match the name given on the first deploy (5.2 A). |
 | `site.domain` | yes | Primary hostname. Must not be used by another site. |
 | `site.alias` | no, repeatable | Extra hostname, redirected (308) to `site.domain`. One per line. Not equal to `site.domain`. |
 | `site.type` | yes | `static`, `node` or `nextjs`. Can't change after the first deploy (decision 15). |
@@ -349,10 +346,6 @@ A. **Resolve the site** (site lock taken)
    3. As `<name>-build`, `git fetch --prune` only `refs/heads/*` and `refs/tags/*` into `repo.git`,
       resolve `ref` to a full SHA, and read and validate `shipit.ini` at that commit (section 3),
       including the `site.env` keys. Then, before building:
-      - If `site.name` differs from the name: on a first deploy, refuse with "shipit.ini says the site
-        name is <x>, but you asked to deploy it as <name>."; later, refuse with "shipit.ini says the
-        site name is <x>, but this repo is deployed as <name>. Renaming a site isn't supported; change
-        site.name back."
       - If `site.type` differs from TYPE in `<name>.conf` (a later deploy), refuse with "shipit.ini
         says the site type is <x>, but this site is deployed as <type>. Changing a site's type isn't
         supported."
@@ -612,9 +605,9 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | # | Deliverable | Verified by |
 |---|---|---|
 | M0 | Delete the old tool's code, new skeleton, dispatcher, helpers kept from the old tool, CI green | `make` |
-| M1 | `shipit.ini` parser + validators | bats (fixtures for every key and error, including an unknown key, a duplicate single-value key, an `[include]` attempt, an unquoted `#` in a value, an invalid `data.dir` (`../x`, `a/b`), `[data]` on a static site, a first-deploy name that differs from `site.name`, a `node.start` with `\n`, `'` or `%`, a `static.root` of `../x`, a `site.health` with a space, and a ref starting with `-`) |
+| M1 | `shipit.ini` parser + validators | bats (fixtures for every key and error, including an unknown key, a duplicate single-value key, an `[include]` attempt, an unquoted `#` in a value, an invalid `data.dir` (`../x`, `a/b`), `[data]` on a static site, a `node.start` with `\n`, `'` or `%`, a `static.root` of `../x`, a `site.health` with a space, and a ref starting with `-`) |
 | M2 | `setup` (incl. SSH hardening, firewall) | bats (golden files for every rendered file) |
-| M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
+| M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
 | M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
 | M6 | `remote` + CI user + GitHub Actions example (done) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
@@ -627,7 +620,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 1 | Web server | **Caddy only.** nginx isn't installed. |
 | 2 | Site types | **`static`, `node`, `nextjs`.** |
 | 3 | Where builds run | **On the VPS, as the site's own build user `<name>-build`**, one build at a time. |
-| 4 | Private repos | **Per-site deploy key.** The first deploy prints it with the GitHub URL and exits non-zero; run deploy again after adding it. The first deploy takes the name on the command line (`shipit deploy <repo-url> <name>`), so the key's folder exists before the first fetch; `site.name` must match. |
+| 4 | Private repos | **Per-site deploy key.** The first deploy prints it with the GitHub URL and exits non-zero; run deploy again after adding it. The first deploy takes the name on the command line (`shipit deploy <repo-url> <name>`), so the key's folder exists before the first fetch. |
 | 5 | Secrets | **Edited by hand over SSH** in `/etc/shipit/sites/<name>.env`. No command or CI path for them. |
 | 6 | First deploy | **By hand, as root.** CI (`ci` user, `shipit remote`) only redeploys and rolls back registered sites. |
 | 7 | SSH hardening | **On**, guarded by the key-login check in 5.1 step 7. |
@@ -638,7 +631,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 12 | Repo config format | **`shipit.ini`, in git's config dialect.** It allows comments, is easy to read, adds no dependency (`git` is already installed), and `git config` is a strict, well-specified parser that exits non-zero on bad syntax. Considered: JSON (no comments) and YAML (needs python3 + yq, has YAML 1.1 quirks, and is a bigger parser to run on untrusted input). |
 | 13 | Site data | **`/var/lib/shipit-<name>` (0700) via systemd `StateDirectory=`, opt-in with `[data]`, node/nextjs only.** No backups, no Caddy-served folders. Not inside `/srv/<name>`: that tree holds code, the build user owns the release folders and `repo.git`, and releases are deleted on prune. `$STATE_DIRECTORY` is a `:`-joined list when `data.dir` is set; this is documented rather than worked around. |
 | 14 | Config follows `current` | **The Caddy file and unit are always rendered from the `shipit.ini` of the release `current` points at**, after every switch, revert and rollback, so rolling back code also rolls back its config. |
-| 15 | Renaming a site, changing its type | **Site name and type are fixed after the first deploy; renaming or changing type = remove + deploy.** A later deploy whose `site.name` or `site.type` differs is refused before building, so a rollback never crosses a type change. |
+| 15 | Renaming a site, changing its type | **The site name (fixed by the first deploy's command line) and the type are fixed after the first deploy; renaming or changing type = remove + deploy.** A later deploy whose `site.type` differs is refused before building, so a rollback never crosses a type change. |
 | 16 | CI host key | **CI pins the VPS host key:** setup prints known_hosts lines, CI uses `StrictHostKeyChecking=yes`. `accept-new` and `ssh-keyscan` on the runner were rejected: a fresh runner would trust any host on every run. |
 | 17 | Who owns `/srv/<name>` | **Root** (`root:<name>`, 2750), and `releases/` too. Root creates and names release folders, owns the symlinks, and takes each release back after its build; `<name>-build` owns only `repo.git`, `.ssh/`, `home/` and the release being built. Rejected: build-owned `/srv/<name>`, where a build step could repoint `current`/`previous` or rename releases that root then follows. |
 | 18 | CI key scope | **One key per site.** `setup --ci-key <name> <key>` puts the site in the forced command (`shipit remote <name>`), and `remote` refuses any other site. Rejected: one shared key, with which any repo could deploy or roll back every site. |
@@ -690,3 +683,4 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 64 | Parsing `$SSH_ORIGINAL_COMMAND` | **One anchored pattern per command**: `^deploy ([a-z][a-z0-9-]*)( ([A-Za-z0-9._/-]+))?$` or `^rollback ([a-z][a-z0-9-]*)$`, then the name must equal the key's and the ref must pass `check_ref` (so `-x` and `--upload-pack=x` are refused, and so is anything git's ref rules refuse). The ref's characters are a subset of what `check_ref` allows, so a branch with other characters can be deployed by hand but not from CI; CI passes `$GITHUB_SHA` anyway. A refused command is echoed with bash's `${cmd@Q}`, so control characters can't reach the CI log raw. |
 | 65 | How `remote` runs the command | **In the same process**: `lib/remote.sh` sources `lib/rollback.sh` (and through it `lib/deploy.sh`) and calls `cmd_deploy <name> [ref]` or `cmd_rollback <name>`, as the dispatcher would. One root process, no second argument parsing, and the arguments passed are the validated ones. |
 | 66 | `authorized_keys` updates | **Rendered line by line, merged, installed through `install_if_changed` (0644)**: the first line is the marker `# managed by shipit: one line per site, written by shipit setup --ci-key <name> <key>.`; a line ending in ` shipit:<name>` is that site's and is replaced in place (a new site's line goes last); every other line, including ones added by hand, is kept as it was. An existing `authorized_keys` without the marker stops setup. Re-running with the same key changes nothing. |
+| 67 | No `site.name` in `shipit.ini` | **The name comes only from the command line** (`shipit deploy <repo-url> <name>`, then `shipit deploy <name>`), and `REPO` in `<name>.conf` ties it to its repo, so a `site.name` key said nothing new and could only disagree with it (and needed two refusal messages). `site.name` is now an unknown key, refused like any other (decision 26), so a `shipit.ini` written for v1.0.0 fails with "shipit.ini has unknown keys: site.name. …" until the line is deleted. A breaking change for those files. |

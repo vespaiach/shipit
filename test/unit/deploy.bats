@@ -619,35 +619,12 @@ EOF
   [ ! -s "$calls" ]
 }
 
-@test "a first deploy whose site.name differs from the name given is refused" {
-  host
-  commit shipit.ini "$(ini docs docs.example.com)" >/dev/null
-  run cmd_deploy https://github.com/me/blog blog
-  [ "$status" -eq 1 ]
-  [ "${lines[-1]}" = "shipit.ini says the site name is docs, but you asked to deploy it as blog." ]
-  [ ! -e "$SRV_ROOT/blog/current" ]
-  [ -z "$(releases)" ]
-}
-
-@test "a renamed site.name is refused on a later deploy" {
-  host
-  run cmd_deploy https://github.com/me/blog blog
-  [ "$status" -eq 0 ]
-  rel=$(current)
-  commit shipit.ini "$(ini blog2 blog.example.com)" >/dev/null
-  run cmd_deploy blog
-  [ "$status" -eq 1 ]
-  [ "${lines[-1]}" = "shipit.ini says the site name is blog2, but this repo is deployed as blog. Renaming a site isn't supported; change site.name back." ]
-  [ "$(current)" = "$rel" ]
-  [ "$(releases)" = "${rel#releases/}" ]
-}
-
 @test "a changed site.type is refused on a later deploy" {
   host
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ]
   rel=$(current)
-  commit shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
   run cmd_deploy blog
   [ "$status" -eq 1 ]
   [ "${lines[-1]}" = "shipit.ini says the site type is nextjs, but this site is deployed as static. Changing a site's type isn't supported." ]
@@ -662,7 +639,7 @@ EOF
   [ "$status" -eq 0 ]
   rel=$(current)
   for line in 'alias = www.other.example.com' 'alias = other.example.com'; do
-    commit shipit.ini "$(ini blog blog.example.com "$line")" >/dev/null
+    commit shipit.ini "$(ini blog.example.com "$line")" >/dev/null
     run cmd_deploy blog
     [ "$status" -eq 1 ]
     [[ ${lines[-1]} == "The hostname "*" is already used by the site other. Remove it from shipit.ini or from other." ]]
@@ -727,7 +704,7 @@ EOF
   host
   stub npm '[ "$1" = run ] || exit 0; mkdir -p .next/cache && echo old >.next/cache/f'
   commit package.json '{"scripts": {"build": "next build"}}' \
-    shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+    shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -879,7 +856,7 @@ EOF
     if [ "$1 $2" = "run build" ]; then mkdir -p dist && echo "built with $SECRET" >dist/index.html; fi'
   commit package.json '{"scripts": {"build": "vite build"}}' package-lock.json '{}' dist/index.html src >/dev/null
   printf '# secrets\nSECRET="s3cr3t value"\nOTHER=1\n' >"$SHIPIT_ETC/sites/blog.env"
-  commit shipit.ini "$(ini blog blog.example.com 'env = SECRET' 'env = OTHER')" >/dev/null
+  commit shipit.ini "$(ini blog.example.com 'env = SECRET' 'env = OTHER')" >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -897,7 +874,7 @@ EOF
   host
   stub make 'echo "make $*" >>"'"$calls"'"'
   commit package.json '{"scripts": {"build": "x"}}' \
-    shipit.ini "$(printf '%s\n[node]\n\tinstall = make deps\n\tbuild = make site' "$(ini blog blog.example.com)")" >/dev/null
+    shipit.ini "$(printf '%s\n[node]\n\tinstall = make deps\n\tbuild = make site' "$(ini blog.example.com)")" >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -909,7 +886,7 @@ EOF
 @test "missing site.env keys are named, before anything is built" {
   host
   printf 'A=1\n' >"$SHIPIT_ETC/sites/blog.env"
-  commit shipit.ini "$(ini blog blog.example.com 'env = A' 'env = B' 'env = C')" >/dev/null
+  commit shipit.ini "$(ini blog.example.com 'env = A' 'env = B' 'env = C')" >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
   [ "${lines[-1]}" = "$SHIPIT_ETC/sites/blog.env is missing B, C, which site.env in shipit.ini needs. Add them as KEY=value lines, then run the deploy again." ]
@@ -963,7 +940,7 @@ EOF
 
 @test "a release without its static.root is refused" {
   host
-  commit shipit.ini "$(ini blog blog.example.com | sed 's/root = dist/root = out/')" >/dev/null
+  commit shipit.ini "$(ini blog.example.com | sed 's/root = dist/root = out/')" >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
   [[ $output == *"The release has no folder out (static.root in shipit.ini)"* ]]
@@ -1014,7 +991,7 @@ EOF
   old_current=$(current) old_previous=$(previous)
   # caddy refuses any config with the new domain.
   stub caddy 'echo "caddy $*" >>"'"$calls"'"; ! grep -q new.example.com "$3" || { echo "Error: bad" >&2; exit 1; }'
-  commit shipit.ini "$(ini blog new.example.com)" >/dev/null
+  commit shipit.ini "$(ini new.example.com)" >/dev/null
   : >"$calls"
   run cmd_deploy blog
   [ "$status" -eq 1 ]
