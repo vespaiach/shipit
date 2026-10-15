@@ -14,8 +14,11 @@ in step with the code.
   dispatcher's `case` and, if public, a line in `usage`.
 - `lib/common.sh` — logging (`log`/`err`/`die`), validators (`check_domain`, `check_port`), locks,
   `render`, `install_if_changed`, `atomic_link`, `health_ok`, and the test-seam constants.
-- `lib/config.sh` — `shipit.ini` reading and validation (`git config`), and the site configs in
-  `/etc/shipit/sites/<name>.conf`.
+- `lib/config.sh` — `shipit.ini`: `ini_load` (one `git config --no-includes -z --list` pass, every
+  key validated, results in `INI_*`), `ini_check_name`/`ini_check_type`/`ini_check_clash` (plan §5.2
+  A.3). Validators `check_site_name`, `check_ref`, `check_repo_url`, and `repo_slug`/`repo_ssh_url`.
+  Site configs: `conf_parse`/`site_conf_read` (data only, into `CONF_*`), `site_conf_write` (atomic
+  rename), `site_next_port`.
 - `lib/<command>.sh` — one per command (`setup`, `deploy`, `rollback`, `remote`), defining
   `cmd_<command>`. Logic lives in small stdin/argument-driven helpers the tests call; the host-touching
   steps stay thin.
@@ -66,7 +69,8 @@ in step with the code.
 
 ## Making a change
 
-Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers) is implemented; M1–M7 are to do.
+Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers) and M1 (`lib/config.sh`) are
+implemented; M2–M7 are to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.
