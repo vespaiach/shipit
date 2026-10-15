@@ -394,11 +394,7 @@ On macOS, install the tools with Homebrew (`/bin/bash` is 3.2; the tests need ba
 `brew install bash bats-core shellcheck shfmt gettext flock`. Tests that need GNU-only tools or root
 skip with a reason.
 
-`make` stubs every host command, so behaviour on a real server (apt, systemd, Caddy, sshd, ufw,
-users, sudo) is checked by hand with [docs/manual-test.md](docs/manual-test.md) before a release.
-
 GitHub Actions runs `make` on every push to `main` and every pull request
-([.github/workflows/check.yml](.github/workflows/check.yml)). The unit tests stub the host, so
-anything host-level (apt, systemd, Caddy, sshd, ufw, real users) must be checked by hand on a VPS.
+([.github/workflows/check.yml](.github/workflows/check.yml)).
 [CLAUDE.md](CLAUDE.md) has the layout and the engineering rules; [docs/plan.md](docs/plan.md) is the
 spec.

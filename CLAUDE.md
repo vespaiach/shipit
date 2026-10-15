@@ -120,8 +120,5 @@ Milestones M0–M7 (plan §8) are done; shipit 1.0.0 is complete.
    README.md and this file if what they say changes. Add bats tests for everything testable without
    root or a real host.
 3. Run `make`.
-4. Open a PR against `main` saying what changed, the decisions taken, and what `make` covers. There
-   are no end-to-end tests: host-level behaviour (apt, systemd, Caddy, sshd, ufw, users, sudo) must be
-   checked by hand on a VPS with [docs/manual-test.md](docs/manual-test.md), and the PR lists what was
-   checked that way (or that it wasn't). Merge
+4. Open a PR against `main` saying what changed, the decisions taken, and what `make` covers. Merge
    once CI passes.
