@@ -1,0 +1,9 @@
+Oct 13 09:58:01 vps sshd-session[1200]: Connection closed by authenticating user root 203.0.113.9 port 50110 [preauth]
+Oct 13 09:58:40 vps sshd-session[1300]: Accepted password for root from 203.0.113.7 port 50200 ssh2
+Oct 13 09:58:40 vps sshd-session[1300]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+Oct 13 10:00:02 vps sshd-session[1400]: Accepted publickey for root from 203.0.113.8 port 50300 ssh2: ED25519 SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG
+Oct 13 10:00:02 vps sshd-session[1400]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+Oct 13 10:01:00 vps sshd[1500]: Accepted publickey for ops from 203.0.113.8 port 50400 ssh2: ED25519 SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG
+Oct 13 10:02:00 vps sshd-session[1600]: Failed publickey for root from 203.0.113.8 port 50500 ssh2: ED25519 SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG
+Oct 13 10:02:01 vps sshd-session[1600]: Accepted keyboard-interactive/pam for root from 203.0.113.8 port 50500 ssh2
+Oct 13 10:03:00 vps sshd-session[11400]: Accepted publickey for root from 203.0.113.8 port 50600 ssh2: ED25519 SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG

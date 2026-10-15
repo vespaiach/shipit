@@ -13,7 +13,8 @@ in step with the code.
   `ci` user's forced command) and isn't in `usage`. A new command needs its library, an entry in the
   dispatcher's `case` and, if public, a line in `usage`.
 - `lib/common.sh` — logging (`log`/`err`/`die`), validators (`check_domain`, `check_port`), locks,
-  `render`, `install_if_changed`, `atomic_link`, `health_ok`, and the test-seam constants.
+  `render`, `install_if_changed`, `is_shipit_file`, `atomic_link`, `health_ok`, and the test-seam
+  constants.
 - `lib/config.sh` — `shipit.ini`: `ini_load` (one `git config --no-includes -z --list` pass, every
   key validated, results in `INI_*`), `ini_check_name`/`ini_check_type`/`ini_check_clash` (plan §5.2
   A.3). Validators `check_site_name`, `check_ref`, `check_repo_url`, and `repo_slug`/`repo_ssh_url`.
@@ -21,8 +22,13 @@ in step with the code.
   rename), `site_next_port`.
 - `lib/<command>.sh` — one per command (`setup`, `deploy`, `rollback`, `remote`), defining
   `cmd_<command>`. Logic lives in small stdin/argument-driven helpers the tests call; the host-touching
-  steps stay thin.
-- `templates/` — what `render` fills in.
+  steps stay thin. `lib/setup.sh`: helpers `version_ge`, `os_supported`, `node_lts_major`,
+  `host_conf_read`, `sshd_ports`, `has_authorized_key`, `session_used_key`, `ssh_key_login_ok`,
+  `known_hosts_lines`, `may_replace`; steps `setup_packages` (`setup_host_conf`, `setup_apt_repos`,
+  `setup_corepack`), `setup_dirs`, `setup_caddy`, `setup_firewall`, `setup_fail2ban`,
+  `setup_auto_upgrades`, `setup_ssh`, `print_known_hosts`, called in order by `cmd_setup`.
+- `templates/` — what `render` fills in: `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
+  `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`.
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`), `test/golden/` (expected
   rendered output), `test/fixtures/`.
@@ -34,10 +40,13 @@ in step with the code.
   (`bin/shipit`, `install.sh`), never in libraries.
 - **Libraries are side-effect free when sourced**: only constants and functions. Tests source them.
 - **Test seams are plain constants** in `common.sh`: `SHIPIT_ETC` (`/etc/shipit`), `SHIPIT_VAR`
-  (`/var/lib/shipit`), `SRV_ROOT` (`/srv`) and `SHIPIT_TEMPLATES` (`templates/` next to `lib/`). Never
-  read them from the environment or add flags for them; tests reassign them after sourcing. Lock
-  helpers take the lock path. Tests stub commands such as `id` and `mv` through `PATH`, so call
-  commands by name (no absolute paths, no `$EUID`).
+  (`/var/lib/shipit`), `SRV_ROOT` (`/srv`), `CADDY_ETC` (`/etc/caddy`), `LOG_ROOT`
+  (`/var/log/shipit`), `OS_RELEASE` (`/etc/os-release`), `APT_ETC` (`/etc/apt`), `SSH_ETC`
+  (`/etc/ssh`), `FAIL2BAN_ETC` (`/etc/fail2ban`), `ROOT_HOME` (`/root`) and `SHIPIT_TEMPLATES`
+  (`templates/` next to `lib/`). Never read them from the environment or add flags for them; tests
+  reassign them after sourcing. Lock helpers take the lock path. Tests stub commands such as `id`,
+  `mv`, `systemctl`, `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl` and `dpkg-query`
+  through `PATH`, so call commands by name (no absolute paths, no `$EUID`).
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value read from a config or `shipit.ini`, or typed by a person, before
   using it.
@@ -50,9 +59,10 @@ in step with the code.
   `caddy validate`, `systemd-analyze verify`, `sshd -t`), then `install -m`.
 - **Atomic switches** go through `atomic_link <target> <link>` (`ln -s target link.new && mv -T
   link.new link`).
-- **Caddy is reloaded, never restarted.** Only overwrite files marked `# managed by shipit` (setup
-  also replaces a package's untouched default config, checked against dpkg's conffile md5). Write
-  through `install_if_changed`, so a re-run changes no file.
+- **Caddy is reloaded, never restarted.** Only overwrite files marked `# managed by shipit` (`//` in
+  apt.conf files; `is_shipit_file`), and setup also replaces a package's untouched default config,
+  checked against dpkg's conffile md5 (`may_replace`). Write through `install_if_changed`, so a
+  re-run changes no file.
 - **Messages** are plain sentences that say what happened and what to do next. Use the exact wording
   the plan gives.
 
@@ -69,8 +79,8 @@ in step with the code.
 
 ## Making a change
 
-Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers) and M1 (`lib/config.sh`) are
-implemented; M2–M7 are to do.
+Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`) and M2
+(`shipit setup`, without `--ci-key`, which comes with M6) are implemented; M3–M7 are to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.

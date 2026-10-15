@@ -70,7 +70,7 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "commands not built yet say so and fail" {
   as_root
-  for cmd in setup deploy rollback remote; do
+  for cmd in deploy rollback remote; do
     run "$shipit" "$cmd" blog
     [ "$status" -eq 1 ]
     [ "$output" = "shipit $cmd isn't implemented yet." ] || {

@@ -1,0 +1,2 @@
+# managed by shipit: the Caddy stable apt repo.
+deb [signed-by=${APT_ETC}/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main

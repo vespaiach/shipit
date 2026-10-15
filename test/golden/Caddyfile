@@ -1,0 +1,7 @@
+# managed by shipit: global options, then one file per site in /etc/caddy/sites.
+{
+	# The admin API (used by reloads) only listens locally.
+	admin localhost:2019
+}
+
+import /etc/caddy/sites/*.caddy

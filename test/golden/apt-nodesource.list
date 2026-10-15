@@ -1,0 +1,2 @@
+# managed by shipit: the NodeSource apt repo for the Node.js major in /etc/shipit/host.conf.
+deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main
