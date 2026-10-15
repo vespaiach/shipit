@@ -32,13 +32,12 @@ temp_root() {
   local r=$BATS_TEST_TMPDIR/root
   CADDY_ETC=$r/etc/caddy LOG_ROOT=$r/var/log/shipit APT_ETC=$r/etc/apt SSH_ETC=$r/etc/ssh
   FAIL2BAN_ETC=$r/etc/fail2ban ROOT_HOME=$r/root OS_RELEASE=$r/etc/os-release
-  SUDOERS_DIR=$r/etc/sudoers.d CI_HOME=$r/home/ci
   SETUP_TMP=$BATS_TEST_TMPDIR/tmp
   mkdir -p "$SETUP_TMP" "$CADDY_ETC" "$ROOT_HOME/.ssh"
   calls=$BATS_TEST_TMPDIR/calls
   : >"$calls"
   local cmd
-  for cmd in systemctl chown ufw apt-get npm curl gpg useradd visudo; do
+  for cmd in systemctl chown ufw apt-get npm curl gpg; do
     stub "$cmd" 'echo "'"$cmd"' $*" >>"'"$calls"'"'
   done
   stub runuser 'echo "runuser $*" >>"'"$calls"'"; while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
@@ -48,16 +47,6 @@ temp_root() {
   stub dpkg-query 'exit 1'
   stub getent 'exit 2'
 }
-
-# ci_key <name> [comment]: generates an ed25519 key pair in the test's temp dir; prints the .pub path.
-ci_key() {
-  command -v ssh-keygen >/dev/null || skip "ssh-keygen (openssh-client) isn't installed"
-  ssh-keygen -q -t ed25519 -N '' -C "${2-me@laptop}" -f "$BATS_TEST_TMPDIR/$1" >/dev/null
-  printf '%s\n' "$BATS_TEST_TMPDIR/$1.pub"
-}
-
-# key_of <pub file>: the file's `<type> <base64>`.
-key_of() { cut -d' ' -f1,2 <"$1"; }
 
 # ---- Templates against golden files --------------------------------------------------------------
 
@@ -88,23 +77,12 @@ key_of() { cut -d' ' -f1,2 <"$1"; }
 
 @test "every template setup writes starts with the managed marker" {
   for f in Caddyfile sshd.conf fail2ban-sshd.conf apt-caddy.list apt-nodesource.list apt-nodejs.pref \
-    apt-auto-upgrades sudoers-ci; do
+    apt-auto-upgrades; do
     is_shipit_file "$tpl/$f" || {
       echo "$f has no marker"
       return 1
     }
   done
-}
-
-@test "sudoers-ci lets ci run only shipit remote, keeping SSH_ORIGINAL_COMMAND" {
-  need_envsubst
-  matches sudoers-ci render "$tpl/sudoers-ci" SHIPIT_BIN
-}
-
-@test "an authorized_keys line forces shipit remote <name> and tags the line with the site" {
-  need_envsubst
-  CI_SITE=blog CI_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleCiKeyForShipitTests000000000000'
-  matches authorized_keys render "$tpl/authorized_keys" SHIPIT_BIN CI_SITE CI_KEY
 }
 
 # ---- Validators on the rendered files (skipped where the tool is missing) -------------------------
@@ -124,15 +102,6 @@ key_of() { cut -d' ' -f1,2 <"$1"; }
   [ "$(id -u)" -eq 0 ] || skip "sshd -t needs root to read the host keys"
   run sshd -t -f "$golden/sshd.conf"
   [ "$status" -eq 0 ]
-}
-
-@test "sudoers-ci passes visudo -c" {
-  command -v visudo >/dev/null || skip "visudo (sudo) isn't installed"
-  run visudo -cqf "$golden/sudoers-ci"
-  [ "$status" -eq 0 ] || {
-    echo "$output"
-    return 1
-  }
 }
 
 @test "the auto-upgrades file passes apt-config" {
@@ -211,215 +180,6 @@ key_of() { cut -d' ' -f1,2 <"$1"; }
   [ "$status" -eq 1 ]
   [[ $output == *"This system is debian 12"* ]]
   [ ! -s "$calls" ]
-}
-
-# ---- --ci-key ------------------------------------------------------------------------------------
-
-@test "setup_args takes no arguments, or --ci-key <name> <file> pairs" {
-  setup_args
-  [ "${#CI_NAMES[@]}" -eq 0 ]
-  blog=$(ci_key blog)
-  api=$(ci_key api)
-  setup_args --ci-key blog "$blog" --ci-key api "$api"
-  [ "${CI_NAMES[*]}" = 'blog api' ]
-  [ "${CI_KEYS[0]}" = "$(key_of "$blog")" ]
-  [ "${CI_KEYS[1]}" = "$(key_of "$api")" ]
-}
-
-@test "setup_args refuses anything else with the usage line" {
-  blog=$(ci_key blog)
-  for args in '--ci-key' '--ci-key blog' "--frobnicate" "blog $blog" "--ci-key blog $blog extra" \
-    "--ci-key blog $blog --ci-key api" "--ci-key=blog $blog" "-- --ci-key blog $blog"; do
-    # shellcheck disable=SC2086 # split on purpose
-    run --separate-stderr setup_args $args
-    [ "$status" -eq 1 ] && [ "$stderr" = "$SETUP_USAGE" ] || {
-      echo "accepted or wrong message: $args: $stderr"
-      return 1
-    }
-  done
-}
-
-@test "setup_args refuses an invalid site name, and a site given twice" {
-  blog=$(ci_key blog)
-  run --separate-stderr setup_args --ci-key Blog "$blog"
-  [ "$status" -eq 1 ]
-  [[ $stderr == "Invalid site name 'Blog'"* ]]
-  run ! setup_args --ci-key ../x "$blog"
-  run --separate-stderr setup_args --ci-key blog "$blog" --ci-key blog "$blog"
-  [ "$status" -eq 1 ]
-  [ "$stderr" = "--ci-key blog is given twice. Give each site one key." ]
-}
-
-@test "--ci-key - reads the key from stdin, once per run" {
-  blog=$(ci_key blog)
-  api=$(ci_key api)
-  setup_args --ci-key blog - --ci-key api "$api" <"$blog"
-  [ "${CI_KEYS[0]}" = "$(key_of "$blog")" ]
-  run --separate-stderr setup_args --ci-key blog - --ci-key api - <"$blog"
-  [ "$status" -eq 1 ]
-  [ "$stderr" = "Only one --ci-key can read its key from stdin (-)." ]
-}
-
-@test "ci_key_parse keeps the type and key, drops the comment, and takes one trailing newline" {
-  blog=$(ci_key blog 'deploy key for blog, 2026')
-  key=$(key_of "$blog")
-  run ci_key_parse "$blog"
-  [ "$status" -eq 0 ]
-  [ "$output" = "$key" ]
-  printf '%s' "$key" >"$BATS_TEST_TMPDIR/bare"
-  run ci_key_parse "$BATS_TEST_TMPDIR/bare"
-  [ "$output" = "$key" ]
-  run ci_key_parse - <"$blog"
-  [ "$output" = "$key" ]
-}
-
-@test "ci_key_parse refuses a second line, options, other types and junk" {
-  blog=$(ci_key blog)
-  key=$(key_of "$blog")
-  f=$BATS_TEST_TMPDIR/bad.pub
-  for body in "$key\n$key" "$key\n\n" "$key\n\nssh-ed25519 AAAA" "$key x\nrestrict" \
-    "restrict $key" "command=\"sh\" $key" "restrict,command=\"sudo sh\" $key" "no-pty $key" \
-    " $key" "$key\r" "${key/ /  }" "${key/ /\\t}" "$key me\tlaptop" "ssh-dss ${key#* }" \
-    "ssh-ed25519" "ssh-ed25519 AAA!" "ssh-ed25519 AAAA===" "" "\n"; do
-    # shellcheck disable=SC2059 # the body's escapes are the point
-    printf "$body" >"$f"
-    run --separate-stderr ci_key_parse "$f"
-    [ "$status" -eq 1 ] && [[ $stderr == "$f isn't a single public key line."* ]] || {
-      echo "accepted: $body ($stderr)"
-      return 1
-    }
-  done
-  run --separate-stderr ci_key_parse - <<<"restrict $key"
-  [[ $stderr == "The key on stdin isn't a single public key line."* ]]
-  run --separate-stderr ci_key_parse "$BATS_TEST_TMPDIR/missing"
-  [ "$status" -eq 1 ]
-  [[ $stderr == *"Can't read $BATS_TEST_TMPDIR/missing." ]]
-}
-
-@test "ci_key_parse refuses well-formed base64 that ssh-keygen doesn't accept" {
-  command -v ssh-keygen >/dev/null || skip "ssh-keygen (openssh-client) isn't installed"
-  f=$BATS_TEST_TMPDIR/bad.pub
-  printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGarbage me@laptop\n' >"$f"
-  run --separate-stderr ci_key_parse "$f"
-  [ "$status" -eq 1 ]
-  [ "$stderr" = "$f isn't a valid public key: ssh-keygen -l refused it." ]
-  # An ed25519 key's bytes under an rsa type.
-  key=$(key_of "$(ci_key blog)")
-  printf 'ssh-rsa %s\n' "${key#* }" >"$f"
-  run ! ci_key_parse "$f"
-}
-
-@test "ci_keys_merge adds a site's line, replaces it in place, and keeps every other line" {
-  f=$BATS_TEST_TMPDIR/authorized_keys
-  run ci_keys_merge "$f" blog 'restrict,command="x blog" ssh-ed25519 AAAA1 shipit:blog'
-  diff <(printf '%s\n' "$output") - <<END
-$CI_KEYS_HEADER
-restrict,command="x blog" ssh-ed25519 AAAA1 shipit:blog
-END
-  cat >"$f" <<END
-$CI_KEYS_HEADER
-restrict,command="x blog" ssh-ed25519 AAAA1 shipit:blog
-# a note added by hand
-ssh-ed25519 AAAAhand someone@laptop
-restrict,command="x blog2" ssh-ed25519 AAAA2 shipit:blog2
-END
-  run ci_keys_merge "$f" blog 'restrict,command="x blog" ssh-ed25519 AAAA3 shipit:blog'
-  diff <(printf '%s\n' "$output") - <<END
-$CI_KEYS_HEADER
-restrict,command="x blog" ssh-ed25519 AAAA3 shipit:blog
-# a note added by hand
-ssh-ed25519 AAAAhand someone@laptop
-restrict,command="x blog2" ssh-ed25519 AAAA2 shipit:blog2
-END
-  run ci_keys_merge "$f" api 'restrict,command="x api" ssh-ed25519 AAAA4 shipit:api'
-  [ "${lines[0]}" = "$CI_KEYS_HEADER" ]
-  [ "${lines[5]}" = 'restrict,command="x api" ssh-ed25519 AAAA4 shipit:api' ]
-  [ "${#lines[@]}" -eq 6 ]
-}
-
-@test "setup_ci_user creates ci once, with /bin/sh and a root-owned home" {
-  temp_root
-  run setup_ci_user
-  [ "$status" -eq 0 ]
-  [ "$output" = "Created the user ci." ]
-  grep -qxF "useradd --system --user-group --no-create-home --home-dir $CI_HOME --shell /bin/sh --password * --comment shipit ci ci" "$calls"
-  grep -qx "chown root:root $CI_HOME $CI_HOME/.ssh" "$calls"
-  [ -d "$CI_HOME/.ssh" ]
-
-  stub getent '[ "$2" = ci ] && echo "ci:x:998:998:shipit ci:/home/ci:/bin/sh"'
-  : >"$calls"
-  run setup_ci_user
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
-  run ! grep -q useradd "$calls"
-}
-
-@test "setup_ci_user refuses a ci user shipit didn't create" {
-  temp_root
-  stub getent '[ "$2" = ci ] && echo "ci:x:1001:1001:Continuous Integration:/home/ci:/bin/bash"'
-  run setup_ci_user
-  [ "$status" -eq 1 ]
-  [[ $output == "A user named ci already exists, and shipit didn't create it"* ]]
-  run ! grep -q useradd "$calls"
-}
-
-@test "the sudoers rule is checked with visudo on a temp copy, and a failing one isn't installed" {
-  need_envsubst
-  temp_root
-  run setup_sudoers
-  [ "$status" -eq 0 ]
-  grep -qx "visudo -cqf $SETUP_TMP/sudoers-ci" "$calls"
-  diff "$SUDOERS_DIR/shipit-ci" "$golden/sudoers-ci"
-  [[ $(ls -l "$SUDOERS_DIR/shipit-ci") == -r--r-----* ]]
-
-  rm -f "$SUDOERS_DIR/shipit-ci"
-  stub visudo 'exit 1'
-  run setup_sudoers
-  [ "$status" -eq 1 ]
-  [[ $output == *"didn't pass visudo -c"* ]]
-  [ ! -e "$SUDOERS_DIR/shipit-ci" ]
-
-  printf 'ci ALL=(ALL) ALL\n' >"$SUDOERS_DIR/shipit-ci"
-  run setup_sudoers
-  [ "$status" -eq 1 ]
-  [[ $output == "$SUDOERS_DIR/shipit-ci wasn't written by shipit"* ]]
-}
-
-@test "setup_ci_keys writes one forced-command line per site, replacing the site's old key" {
-  need_envsubst
-  temp_root
-  conf=$CI_HOME/.ssh/authorized_keys
-  run setup_ci_keys # no --ci-key: nothing to write
-  [ ! -e "$conf" ]
-  mkdir -p "$CI_HOME/.ssh"
-  blog=$(ci_key blog)
-  api=$(ci_key api)
-  setup_args --ci-key blog "$blog" --ci-key api "$api"
-  run setup_ci_keys
-  [ "$status" -eq 0 ]
-  [ "$output" = "Wrote $conf: the CI key of blog api." ]
-  diff "$conf" - <<END
-$CI_KEYS_HEADER
-restrict,command="sudo /usr/local/bin/shipit remote blog" $(key_of "$blog") shipit:blog
-restrict,command="sudo /usr/local/bin/shipit remote api" $(key_of "$api") shipit:api
-END
-  [[ $(ls -l "$conf") == -rw-r--r--* ]]
-  # The same keys again: nothing changes.
-  run setup_ci_keys
-  [ -z "$output" ]
-  # A new key for blog replaces its line; api's stays.
-  blog2=$(ci_key blog2)
-  setup_args --ci-key blog "$blog2"
-  run setup_ci_keys
-  [ "$(grep -c . "$conf")" -eq 3 ]
-  grep -qxF "restrict,command=\"sudo /usr/local/bin/shipit remote blog\" $(key_of "$blog2") shipit:blog" "$conf"
-  grep -qF "$(key_of "$api") shipit:api" "$conf"
-  run ! grep -qF "$(key_of "$blog")" "$conf"
-
-  printf 'ssh-ed25519 AAAAmine me\n' >"$conf"
-  run setup_ci_keys
-  [ "$status" -eq 1 ]
-  [[ $output == "$conf wasn't written by shipit"* ]]
 }
 
 # ---- Node.js LTS and host.conf -------------------------------------------------------------------
@@ -607,28 +367,6 @@ EOF
   [ ! -e "$SSH_ETC/sshd_config.d/10-shipit.conf" ]
 }
 
-# ---- Host keys -----------------------------------------------------------------------------------
-
-@test "known_hosts_lines prints one <host> line per host key, without comments" {
-  run known_hosts_lines "$fixtures/ssh"
-  [ "$status" -eq 0 ]
-  diff <(printf '%s\n' "$output") - <<'EOF'
-<host> ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYExample=
-<host> ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleEd25519HostKeyForShipitTests00000
-<host> ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQExample==
-EOF
-  run known_hosts_lines "$BATS_TEST_TMPDIR"
-  [ "$status" -eq 1 ]
-}
-
-@test "print_known_hosts ends with the plan's sentence" {
-  SSH_ETC=$fixtures/ssh
-  run print_known_hosts
-  [ "$status" -eq 0 ]
-  [ "${lines[-1]}" = "Replace <host> with the address CI connects to (use [host]:port if SSH isn't on 22), and save these lines as the GitHub secret VPS_KNOWN_HOSTS." ]
-  [ "${lines[0]}" = '<host> ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYExample=' ]
-}
-
 # ---- Which files setup may overwrite -------------------------------------------------------------
 
 @test "may_replace: missing, marked (# or //) or the package's untouched default" {
@@ -711,11 +449,9 @@ EOF
   mkdir -p "$APT_ETC/keyrings"
   echo key >"$APT_ETC/keyrings/caddy-stable-archive-keyring.gpg"
   echo key >"$APT_ETC/keyrings/nodesource.gpg"
-  setup_args --ci-key blog "$(ci_key blog)"
   steps() {
     setup_apt_repos || true
-    setup_dirs && setup_ci_user && setup_caddy && setup_fail2ban && setup_auto_upgrades \
-      && setup_sudoers && setup_ci_keys && setup_ssh
+    setup_dirs && setup_caddy && setup_fail2ban && setup_auto_upgrades && setup_ssh
   }
   snapshot() { (cd "$BATS_TEST_TMPDIR" && find root etc var srv -type f -exec cksum {} + | sort); }
 
@@ -726,7 +462,7 @@ EOF
   for f in "$CADDY_ETC/Caddyfile" "$FAIL2BAN_ETC/jail.d/shipit-sshd.conf" \
     "$APT_ETC/apt.conf.d/52shipit-auto-upgrades" "$SSH_ETC/sshd_config.d/10-shipit.conf" \
     "$APT_ETC/sources.list.d/caddy-stable.list" "$APT_ETC/sources.list.d/nodesource.list" \
-    "$APT_ETC/preferences.d/shipit-nodejs" "$SUDOERS_DIR/shipit-ci" "$CI_HOME/.ssh/authorized_keys"; do
+    "$APT_ETC/preferences.d/shipit-nodejs"; do
     is_shipit_file "$f"
   done
   diff "$CADDY_ETC/Caddyfile" <(render "$tpl/Caddyfile" CADDY_ETC)
@@ -742,7 +478,6 @@ EOF
   before=$(snapshot)
 
   : >"$calls"
-  stub getent '[ "$2" = ci ] && echo "ci:x:998:998:shipit ci:/home/ci:/bin/sh"'
   run steps
   [ "$status" -eq 0 ]
   [ -z "$output" ]

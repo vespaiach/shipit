@@ -23,7 +23,7 @@ Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state fol
 | Node.js LTS | NodeSource apt repo for the LTS major current when `setup` first runs (looked up in `nodejs.org/dist/index.json` with `jq`). The major is recorded in `/etc/shipit/host.conf` and never changed automatically; re-running `setup` keeps it. |
 | One rollback version | After a deploy finishes, each site keeps at most two releases: `current` and `previous`. Every successful deploy deletes the rest. |
 | Many sites per VPS | Each site gets its own folder, two Linux users, port (Node/Next.js), Caddy site file and systemd unit. Domains and ports are checked for uniqueness across sites. |
-| Remote via SSH / CI | No prompts in any command. A dedicated `ci` SSH user may only run `deploy` and `rollback`, and each CI key only for its own site (forced command + one sudoers line). Exit status 0 = success, non-zero = failure, so CI steps fail correctly. |
+| Remote via SSH | No prompts in any command. Exit status 0 = success, non-zero = failure, so a script over SSH sees failures. There is no CI path (decision 68). |
 | Common repo config | Each repo has a `shipit.ini` at its root, in git's config dialect, read with `git config` (section 3). |
 
 ## 2. Packages installed by `setup`
@@ -41,7 +41,7 @@ Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state fol
 | `ufw` | Firewall: allow the ports sshd listens on (5.1 step 5), 80/tcp, 443/tcp and 443/udp (HTTP/3); deny the rest. |
 | `unattended-upgrades` | Automatic security updates. |
 | `fail2ban` | Bans IPs that brute-force SSH (`sshd` jail with `backend = systemd`: Debian 13 has no `/var/log/auth.log`). |
-| `sudo` | The `ci` user runs `shipit remote` through one sudoers rule; `visudo` checks it (5.1 step 6). Minimal images may lack it. |
+| `sudo` | Lets the admin run `sudo shipit`. Minimal images may lack it. |
 | (already present) `util-linux` (`flock`), `systemd` | Locks, services. |
 
 ## 3. Repo config: `shipit.ini`
@@ -244,15 +244,11 @@ Users (each site gets two system accounts, neither can log in):
   every repo command (`git fetch`, install, build). Its home is `/srv/<name>/home`, so its npm cache and
   deploy key stay inside the site.
 - `<name>` (system, no login) runs a Node/Next.js site's process; it reads the release, writes nothing there.
-- `ci` (login by SSH key only, forced command) can trigger `deploy` and `rollback` and nothing else;
-  each key is tied to one site (5.1 step 6). Its login shell is `/bin/sh`, because sshd runs the forced
-  command through it; the key can't choose another command. A system user (GECOS `shipit ci`), with
-  password field `*` and a root-owned home `/home/ci` (decision 63).
-- Root runs `shipit` (directly, or via `sudo` for `ci`).
+- Root runs `shipit` (directly, or via `sudo`).
 
 ## 5. Commands
 
-### 5.1 `shipit setup [--ci-key <name> <public key file | ->]...`
+### 5.1 `shipit setup`
 
 Idempotent: re-running changes no file whose content is already right.
 
@@ -265,9 +261,8 @@ Idempotent: re-running changes no file whose content is already right.
    `/etc/apt/preferences.d/shipit-nodejs` pins `nodejs` to NodeSource. A source file shipit didn't
    write is left alone, with a message. The NodeSource line uses NODE_MAJOR from `host.conf`, written
    on the first run. The npm install is skipped when `corepack --version` already prints the pin.
-3. Create `ci` (shell `/bin/sh`; on every run, with or without `--ci-key`, decision 63); create
-   `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`, `/srv`, `/var/log/shipit` (root:root,
-   0755). An existing `ci` user that shipit didn't create stops setup.
+3. Create `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`, `/srv`, `/var/log/shipit` (root:root,
+   0755).
 4. Write `/etc/caddy/Caddyfile` (`import /etc/caddy/sites/*.caddy`), validate, reload Caddy (only if
    it changed). Caddy files are always validated as `caddy` (`runuser -u caddy -- caddy validate`):
    validating opens the log files, and run as root it would create them owned by root, breaking the
@@ -278,17 +273,7 @@ Idempotent: re-running changes no file whose content is already right.
    (`ufw --force enable`). fail2ban: enable the `sshd` jail with `backend = systemd`
    (`/etc/fail2ban/jail.d/shipit-sshd.conf`; fail2ban reloaded if it changed).
    unattended-upgrades: enable (`/etc/apt/apt.conf.d/52shipit-auto-upgrades`, decision 29).
-6. For each `--ci-key <name> <file>` (repeatable; re-run setup to add a site's key later; the site
-   doesn't have to exist yet): the key must be exactly one line, accepted by `ssh-keygen -l -f`, and
-   made only of a key type, base64 and an optional comment, so it can't add a second line or its own
-   options. Install it in `~ci/.ssh/authorized_keys` as
-   `restrict,command="sudo /usr/local/bin/shipit remote <name>" <key> shipit:<name>`, replacing that
-   site's previous line and keeping the others. Write `/etc/sudoers.d/shipit-ci` (validated with
-   `visudo -cf` on a temp copy first): `ci ALL=(root) NOPASSWD: /usr/local/bin/shipit remote *` plus
-   `Defaults:ci env_keep += SSH_ORIGINAL_COMMAND`. The wildcard is safe because a `ci` key can't run
-   anything but its forced command, which fixes the arguments, and `remote` validates them.
-   The sudoers file is written on every run; `authorized_keys` only when `--ci-key` is given. Every
-   `--ci-key` is parsed and its key checked before setup changes anything (decision 62).
+6. Removed (decision 68).
 7. SSH hardening: write `/etc/ssh/sshd_config.d/10-shipit.conf` (`PasswordAuthentication no`,
    `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`), check it with `sshd -t`,
    install, `systemctl reload ssh`. Done **only** if root has a key in `authorized_keys` and the current
@@ -297,23 +282,17 @@ Idempotent: re-running changes no file whose content is already right.
    of the setup process: the `sshd`/`sshd-session` pid that logged the login is one of them. If the
    journal can't be read, the step is skipped too. `sshd -t -f <temp copy>` checks the drop-in on its
    own (decision 31).
-8. Print the host key lines for `VPS_KNOWN_HOSTS`: one known_hosts line per
-   `/etc/ssh/ssh_host_*_key.pub`, with `<host>` as a placeholder for the name or IP CI will use, then:
-   "Replace <host> with the address CI connects to (use [host]:port if SSH isn't on 22), and save these
-   lines as the GitHub secret VPS_KNOWN_HOSTS." Setup can't know the public address, so it doesn't
-   guess.
+8. Removed (decision 68).
 
 Bootstrap from your laptop:
 ```bash
 ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v1.0.0.tar.gz | tar -xz && cd shipit-1.0.0 && ./install.sh'
-ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub
+ssh root@vps 'shipit setup'
 ```
-The last lines `setup` prints are the known_hosts lines: replace `<host>` and save them as the GitHub
-secret `VPS_KNOWN_HOSTS` (section 5.4).
 
 ### 5.2 `shipit deploy <name> [ref]` / `shipit deploy <repo-url> <name> [ref]`
 
-`ref` defaults to the repo's default branch; CI passes `$GITHUB_SHA`. A ref is a 40-hex SHA or a
+`ref` defaults to the repo's default branch. A ref is a 40-hex SHA or a
 name accepted by `git check-ref-format --branch` that doesn't start with `-`, and git gets it after
 `--end-of-options`. The URL form is needed for a site's first deploy; for a known site it's accepted if
 the URL matches the registered REPO. The only accepted URL is `https://github.com/<owner>/<repo>`
@@ -426,110 +405,9 @@ is then `previous`. Nothing is pruned or deleted: both releases are kept.
 Rollback swaps code only, never data (`/var/lib/shipit-<name>` is untouched). Schema changes, e.g.
 SQLite migrations, must stay compatible with the previous release for one version.
 
-### 5.4 `shipit remote <name>` (internal, used only by the `ci` forced command)
+### 5.4 Removed
 
-`<name>` comes from the key's forced command. Parses `$SSH_ORIGINAL_COMMAND` strictly:
-`deploy <name> [<40-hex sha | branch>]` (the ref rule of 5.2) or `rollback <name>`, and the name must
-equal the key's `<name>`, so a site's key can't act on another site. Only sites that have completed a
-deploy (no first deploys from CI). Anything else: refused.
-
-- The whole string must match one pattern: words separated by single spaces, no leading or trailing
-  whitespace, the ref made only of letters, digits and `. _ / -` and then passing `check_ref`
-  (decision 64). Tabs, newlines, quotes and shell syntax never match. Refused: "Refused the command
-  <quoted command>. This key can only run: deploy <name> [<commit sha or branch>], or rollback
-  <name>." An empty command (an interactive login) says "No command given." before the same list.
-- Another site's name: "This key belongs to the site <name>, so it can't deploy or roll back <other>."
-  This is checked before the site config is read.
-- A site without TYPE: "<name> has never been deployed successfully. Its first deploy must be run by
-  hand, as root: shipit deploy <repo-url> <name>"; an unknown site gets 5.2 A.1's message.
-- `shipit remote` itself takes exactly one valid name; anything else prints "Usage: shipit remote
-  <name>. Only the ci user's SSH keys run it, as their forced command."
-- The command runs in the same root process (`cmd_deploy <name> [ref]` or `cmd_rollback <name>`,
-  decision 65), never with a URL.
-- `$SSH_ORIGINAL_COMMAND` is the only value shipit reads from the environment. It's input, parsed as
-  above, not a setting.
-
-The two workflows below are also in `examples/deploy.yml` and `examples/rollback.yml` (a unit test
-keeps them identical to this section).
-
-GitHub secrets (per repo):
-- `SHIPIT_KEY`: this site's CI private key (its public half was given to `setup --ci-key <name>`).
-- `VPS_KNOWN_HOSTS`: the known_hosts lines `setup` printed, with `<host>` replaced.
-- `VPS_HOST`: the name or IP CI connects to.
-- `VPS_PORT` (optional): the SSH port, if it isn't 22.
-
-GitHub Actions deploy workflow:
-```yaml
-name: deploy
-on:
-  push:
-    branches: [main]
-concurrency:
-  group: deploy-blog
-  cancel-in-progress: false
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to VPS
-        env:
-          SHIPIT_KEY: ${{ secrets.SHIPIT_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
-        run: |
-          install -d -m 700 ~/.ssh
-          install -m 600 /dev/stdin ~/.ssh/id_ed25519 <<< "$SHIPIT_KEY"
-          install -m 644 /dev/stdin ~/.ssh/known_hosts <<< "$VPS_KNOWN_HOSTS"
-          ssh -p "${VPS_PORT:-22}" -o StrictHostKeyChecking=yes \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=6 "ci@$VPS_HOST" deploy blog "$GITHUB_SHA"
-```
-
-Manual rollback workflow (run from the Actions tab):
-```yaml
-name: rollback
-on: workflow_dispatch
-concurrency:
-  group: deploy-blog
-  cancel-in-progress: false
-jobs:
-  rollback:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Roll back on VPS
-        env:
-          SHIPIT_KEY: ${{ secrets.SHIPIT_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
-        run: |
-          install -d -m 700 ~/.ssh
-          install -m 600 /dev/stdin ~/.ssh/id_ed25519 <<< "$SHIPIT_KEY"
-          install -m 644 /dev/stdin ~/.ssh/known_hosts <<< "$VPS_KNOWN_HOSTS"
-          ssh -p "${VPS_PORT:-22}" -o StrictHostKeyChecking=yes \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=6 "ci@$VPS_HOST" rollback blog
-```
-
-Why the workflows look like this:
-- **Pinned host key.** `StrictHostKeyChecking=accept-new` checks nothing on a GitHub runner: every
-  runner starts with an empty known_hosts, so it trusts whatever answers. The workflow writes
-  `VPS_KNOWN_HOSTS` to `~/.ssh/known_hosts` and connects with `StrictHostKeyChecking=yes`. Instead of
-  copying setup's output, the keys can also be fetched over an already-trusted connection:
-  `ssh root@vps 'cat /etc/ssh/ssh_host_ed25519_key.pub'`. Don't use `ssh-keyscan` from the runner: it
-  has the same trust-on-first-use problem.
-- **Long builds stay connected.** The build runs on the VPS while the SSH session stays open, streaming
-  its output to the Actions log. `ServerAliveInterval=30` and `ServerAliveCountMax=6` keep an
-  idle-looking connection from being dropped by a NAT or firewall in the middle of a build, and notice
-  a really dead connection within about 3 minutes.
-- **One deploy at a time.** The workflow-level `concurrency` group (`deploy-<name>`,
-  `cancel-in-progress: false`) keeps at most one running and one pending run: a newer pending run
-  replaces the older pending one. For pushes that means the newest commit wins and intermediate pushes
-  are skipped. The rollback workflow uses the same group, so a rollback can't run alongside a deploy;
-  but a rollback waiting behind a running deploy is cancelled by a newer push (and a pending deploy by
-  a rollback), so re-run it once the deploy finishes. The server-side site lock is the real guarantee;
-  the concurrency group only keeps runs visible in GitHub and avoids runners waiting on SSH.
-- **Secrets go through `env:`**, not `${{ }}` inside `run:`, so a secret's content is never pasted into
-  the shell script itself.
+`shipit remote`, the `ci` user and the GitHub Actions workflows were removed (decision 68). The number is kept so that references to 5.5 and later stay valid.
 
 ### 5.5 Config follows `current`
 
@@ -564,17 +442,14 @@ name, which only root sets and the build user can't rename, and the commit is pi
   `data.dir`, and `StateDirectoryMode=0700`. `nextjs`: `site-nextjs.service` adds
   `CacheDirectory=shipit-<name>`, `CacheDirectoryMode=0700` (decision 51). Installed as
   `/etc/systemd/system/shipit-<name>.service`.
-- `sshd.conf` (the drop-in), `sudoers-ci`, `authorized_keys` line (one per site key),
-  `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's SSH host keys, copied, not
-  rendered). The `authorized_keys` template is one key line, so it has no marker; setup writes the
-  marker as the file's first line (decision 66).
+- `sshd.conf` (the drop-in), `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's
+  SSH host keys, copied, not rendered).
 - `apt-caddy.list`, `apt-nodesource.list` (NODE_MAJOR), `apt-nodejs.pref` (the NodeSource pin),
   `apt-auto-upgrades` (unattended-upgrades on).
 
 Every file rendered from these templates starts with a `# managed by shipit` line (`//` in apt.conf
 files): each template that begins a file carries it, but not the parts rendered after
-`site-log.caddy` or `site.service` (decisions 46, 51), nor `authorized_keys`, whose marker setup
-writes as the file's first line (decision 66). Setup overwrites a file only when one of its first three lines is that marker, or
+`site-log.caddy` or `site.service` (decisions 46, 51). Setup overwrites a file only when one of its first three lines is that marker, or
 when it's missing (or, for the Caddyfile, Caddy's untouched default).
 
 Each template gets a golden file and a unit test (kept from the old tool).
@@ -582,15 +457,13 @@ Each template gets a golden file and a unit test (kept from the old tool).
 ## 7. Code layout
 
 ```
-bin/shipit           dispatcher: setup | deploy | rollback | remote | help
+bin/shipit           dispatcher: setup | deploy | rollback | help
 lib/common.sh        log/err/die, validators, locks, render, install_if_changed, atomic_link, health_ok
 lib/config.sh        shipit.ini reading + validation (git config), site .conf read/write
 lib/setup.sh
 lib/deploy.sh        resolve → build → switch → prune
 lib/rollback.sh
-lib/remote.sh
 templates/
-examples/            deploy.yml, rollback.yml (the workflows of 5.4)
 install.sh
 test/unit/*.bats, test/golden/, test/fixtures/   (make: lint + bats, CI unchanged)
 ```
@@ -610,7 +483,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
 | M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
-| M6 | `remote` + CI user + GitHub Actions example (done) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
+| M6 | `remote` + CI user + GitHub Actions example (done; removed later, decision 68) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten (done) | review |
 
 ## 9. Decisions
@@ -621,20 +494,18 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 2 | Site types | **`static`, `node`, `nextjs`.** |
 | 3 | Where builds run | **On the VPS, as the site's own build user `<name>-build`**, one build at a time. |
 | 4 | Private repos | **Per-site deploy key.** The first deploy prints it with the GitHub URL and exits non-zero; run deploy again after adding it. The first deploy takes the name on the command line (`shipit deploy <repo-url> <name>`), so the key's folder exists before the first fetch. |
-| 5 | Secrets | **Edited by hand over SSH** in `/etc/shipit/sites/<name>.env`. No command or CI path for them. |
-| 6 | First deploy | **By hand, as root.** CI (`ci` user, `shipit remote`) only redeploys and rolls back registered sites. |
+| 5 | Secrets | **Edited by hand over SSH** in `/etc/shipit/sites/<name>.env`. No command for them. |
+| 6 | First deploy | **By hand, as root**, like every other command. |
 | 7 | SSH hardening | **On**, guarded by the key-login check in 5.1 step 7. |
 | 8 | Downtime on Node/Next.js deploy | **Accepted**: a ~1–3 s gap while the unit restarts. No blue/green. |
-| 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/cache/shipit-<name>`, `/var/log/shipit/<name>`, `/var/lib/shipit/<name>.lock`, the site's line in `~ci/.ssh/authorized_keys`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
+| 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/cache/shipit-<name>`, `/var/log/shipit/<name>`, `/var/lib/shipit/<name>.lock`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
 | 10 | Rewrite approach | **Fresh rewrite** on a new branch; keep the old tool's helpers listed in section 7. |
 | 11 | Who runs shipit | **Root.** Repo code only ever runs as `<name>-build` (build) or `<name>` (runtime). Running shipit itself as an unprivileged user was considered and rejected: it needs two privilege modes, an extra command and sudo rules for restarts anyway, and the CI path is already limited by the forced command plus strict `shipit remote` parsing. |
 | 12 | Repo config format | **`shipit.ini`, in git's config dialect.** It allows comments, is easy to read, adds no dependency (`git` is already installed), and `git config` is a strict, well-specified parser that exits non-zero on bad syntax. Considered: JSON (no comments) and YAML (needs python3 + yq, has YAML 1.1 quirks, and is a bigger parser to run on untrusted input). |
 | 13 | Site data | **`/var/lib/shipit-<name>` (0700) via systemd `StateDirectory=`, opt-in with `[data]`, node/nextjs only.** No backups, no Caddy-served folders. Not inside `/srv/<name>`: that tree holds code, the build user owns the release folders and `repo.git`, and releases are deleted on prune. `$STATE_DIRECTORY` is a `:`-joined list when `data.dir` is set; this is documented rather than worked around. |
 | 14 | Config follows `current` | **The Caddy file and unit are always rendered from the `shipit.ini` of the release `current` points at**, after every switch, revert and rollback, so rolling back code also rolls back its config. |
 | 15 | Renaming a site, changing its type | **The site name (fixed by the first deploy's command line) and the type are fixed after the first deploy; renaming or changing type = remove + deploy.** A later deploy whose `site.type` differs is refused before building, so a rollback never crosses a type change. |
-| 16 | CI host key | **CI pins the VPS host key:** setup prints known_hosts lines, CI uses `StrictHostKeyChecking=yes`. `accept-new` and `ssh-keyscan` on the runner were rejected: a fresh runner would trust any host on every run. |
 | 17 | Who owns `/srv/<name>` | **Root** (`root:<name>`, 2750), and `releases/` too. Root creates and names release folders, owns the symlinks, and takes each release back after its build; `<name>-build` owns only `repo.git`, `.ssh/`, `home/` and the release being built. Rejected: build-owned `/srv/<name>`, where a build step could repoint `current`/`previous` or rename releases that root then follows. |
-| 18 | CI key scope | **One key per site.** `setup --ci-key <name> <key>` puts the site in the forced command (`shipit remote <name>`), and `remote` refuses any other site. Rejected: one shared key, with which any repo could deploy or roll back every site. |
 | 19 | Next.js runtime cache | **`CacheDirectory=shipit-<name>`**, linked from `.next/cache` after the build and emptied (`systemctl clean --what=cache`) on every switch, so a rollback never serves pages cached by the newer release. |
 | 20 | Logs | **Per-site access logs in `/var/log/shipit/<name>/access.log`, rolled by Caddy; app and Caddy errors in the journal; build output only in the SSH session/Actions log. No logrotate.** |
 | 21 | Caddy's access to static sites | **ACLs (`setfacl`) on the served folder only**, set after the build. Rejected: adding `caddy` to group `<name>`, which let Caddy read `repo.git`, the whole release and the env file (so one site's symlink could publish another's), and which a running Caddy only sees after a restart. |
@@ -678,9 +549,5 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. |
 | 60 | Rollback's swap order | **`previous` → old `current` first, then `current` → old `previous`**, as deploy's C.1 orders them. A crash in between leaves `current` and the config rendered from it unchanged (the site keeps serving what it served), with both links on the same release; rollback treats a `previous` equal to `current` as no `previous`. The other order would leave `current` on the older release with the newer release's config until something re-rendered it. Going back after a failure uses the same order. |
 | 61 | Waiting for the site lock | **One message for deploy and rollback: "Another deploy or rollback of <name> is running; waiting."** The waiting command can't know which of the two holds the lock. |
-| 62 | `--ci-key` input | **Parsed and checked before anything changes** (even before the OS check), so a bad key leaves the VPS as it was. Only `--ci-key <name> <file \| ->` pairs; anything else prints "Usage: shipit setup [--ci-key <name> <public key file \| ->]...". A site may be given once per run, and only one key may come from stdin (`-`). The file must be one line (one trailing newline allowed; any second line, even an empty one, is refused) matching `^<type> <base64>( <printable ASCII>)?$`, with `<type>` one of `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`, `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` and `ssh-rsa` (accepted: older CI setups still use RSA keys, and `ssh-keygen -l` checks the key itself), and `<base64>` `[A-Za-z0-9+/]+={0,2}`. Anything before the type (options such as `restrict` or `command="..."`) doesn't match. Only `<type> <base64>` is kept: written to a temp file, it must pass `ssh-keygen -l -f`, and it's what goes into the line; the user's comment is dropped and `shipit:<name>` takes its place. |
-| 63 | The `ci` user | **Created by every `setup` run**, so adding a key later only touches `authorized_keys`: `useradd --system --user-group --no-create-home --home-dir /home/ci --shell /bin/sh --password '*' --comment 'shipit ci' ci`. It's shipit's when its GECOS is exactly `shipit ci` (as decision 36); any other `ci` user stops setup. Password field `*`: no password matches it, and unlike `!` sshd doesn't treat it as locked when `UsePAM` is off, so key logins work either way. `/home/ci` and `/home/ci/.ssh` are `root:root` 0755 and `authorized_keys` `root:root` 0644 (sshd's `StrictModes` accepts root-owned files): ci owns nothing, so even code running as ci couldn't change its forced commands, and root never writes into a folder another user controls. `/etc/sudoers.d/shipit-ci` (0440) is also written on every run, checked with `visudo -cqf` on the temp copy (with `-f`, visudo doesn't check owner or mode). Seams: `CI_HOME` and `SUDOERS_DIR` in `lib/common.sh`; `SHIPIT_BIN` (`/usr/local/bin/shipit`, where install.sh links it) is a plain constant in `lib/setup.sh`. |
-| 64 | Parsing `$SSH_ORIGINAL_COMMAND` | **One anchored pattern per command**: `^deploy ([a-z][a-z0-9-]*)( ([A-Za-z0-9._/-]+))?$` or `^rollback ([a-z][a-z0-9-]*)$`, then the name must equal the key's and the ref must pass `check_ref` (so `-x` and `--upload-pack=x` are refused, and so is anything git's ref rules refuse). The ref's characters are a subset of what `check_ref` allows, so a branch with other characters can be deployed by hand but not from CI; CI passes `$GITHUB_SHA` anyway. A refused command is echoed with bash's `${cmd@Q}`, so control characters can't reach the CI log raw. |
-| 65 | How `remote` runs the command | **In the same process**: `lib/remote.sh` sources `lib/rollback.sh` (and through it `lib/deploy.sh`) and calls `cmd_deploy <name> [ref]` or `cmd_rollback <name>`, as the dispatcher would. One root process, no second argument parsing, and the arguments passed are the validated ones. |
-| 66 | `authorized_keys` updates | **Rendered line by line, merged, installed through `install_if_changed` (0644)**: the first line is the marker `# managed by shipit: one line per site, written by shipit setup --ci-key <name> <key>.`; a line ending in ` shipit:<name>` is that site's and is replaced in place (a new site's line goes last); every other line, including ones added by hand, is kept as it was. An existing `authorized_keys` without the marker stops setup. Re-running with the same key changes nothing. |
 | 67 | No `site.name` in `shipit.ini` | **The name comes only from the command line** (`shipit deploy <repo-url> <name>`, then `shipit deploy <name>`), and `REPO` in `<name>.conf` ties it to its repo, so a `site.name` key said nothing new and could only disagree with it (and needed two refusal messages). `site.name` is now an unknown key, refused like any other (decision 26), so a `shipit.ini` written for v1.0.0 fails with "shipit.ini has unknown keys: site.name. …" until the line is deleted. A breaking change for those files. |
+| 68 | CI deployment removed | **No `ci` user, no `shipit remote`, no `--ci-key`, no sudoers rule, no known_hosts output, no workflow examples.** Deploys and rollbacks are run by hand as root (over SSH if you like). Removed with it: decisions 16, 18 and 62–66, which only concerned CI. Numbers of the other decisions, setup steps (6 and 8 are now empty) and sections (5.4) are kept so references stay valid. An existing VPS keeps its `ci` user, `/etc/sudoers.d/shipit-ci` and `/home/ci/.ssh/authorized_keys`: setup no longer touches them, so remove them by hand (`userdel ci`, `rm /etc/sudoers.d/shipit-ci`, `rm -r /home/ci`). |

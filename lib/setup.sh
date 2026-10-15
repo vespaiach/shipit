@@ -20,21 +20,7 @@ BOOTSTRAP_PACKAGES=(ca-certificates curl gnupg jq)
 PACKAGES=(caddy nodejs jq curl git ca-certificates gnupg gettext-base acl ufw unattended-upgrades
   fail2ban sudo)
 
-SETUP_USAGE='Usage: shipit setup [--ci-key <name> <public key file | ->]...'
-# Where install.sh links shipit: the path in the ci user's forced commands and sudoers rule.
-# shellcheck disable=SC2034 # read by render
-SHIPIT_BIN=/usr/local/bin/shipit
-# The ci user (plan §4): how setup recognises the user it made (its GECOS field), and its shell, which
-# sshd runs the forced command with.
-CI_COMMENT='shipit ci'
-CI_SHELL=/bin/sh
-# The first line of the ci user's authorized_keys.
-CI_KEYS_HEADER='# managed by shipit: one line per site, written by shipit setup --ci-key <name> <key>.'
-# The key types --ci-key accepts.
-CI_KEY_TYPES='ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-rsa'
-
-# The --ci-key arguments, validated by setup_args: site names and their keys (`<type> <base64>`).
-CI_NAMES=() CI_KEYS=()
+SETUP_USAGE='Usage: shipit setup (it takes no arguments)'
 
 # ---- Small parsers and checks (unit-tested) ------------------------------------------------------
 
@@ -172,21 +158,6 @@ ancestor_pids() {
   done
 }
 
-# known_hosts_lines <dir>: one `<host> <type> <base64>` line per <dir>/ssh_host_*_key.pub (plan §5.1
-# step 8). Fails when there is no valid key file.
-known_hosts_lines() {
-  local LC_ALL=C f line found=''
-  for f in "$1"/ssh_host_*_key.pub; do
-    [ -f "$f" ] || continue
-    IFS= read -r line <"$f" || [ -n "$line" ] || continue
-    [[ $line =~ ^(ssh-[a-z0-9]+|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9@.-]+)\ (AAAA[A-Za-z0-9+/]*=*)(\ .*)?$ ]] \
-      || continue
-    printf '<host> %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
-    found=1
-  done
-  [ -n "$found" ]
-}
-
 # is_package_default <file> <package>: the file is the package's conffile, unmodified (dpkg's md5).
 is_package_default() {
   local sum
@@ -198,87 +169,6 @@ is_package_default() {
 # still the package's untouched default (a fresh VPS ships Caddy's stock Caddyfile).
 may_replace() {
   [ ! -e "$1" ] || is_shipit_file "$1" || { [ -n "${2-}" ] && is_package_default "$1" "$2"; }
-}
-
-# ci_key_parse <file | ->: prints the public key in the file (or on stdin) as `<type> <base64>`. The
-# file must be exactly one line (one trailing newline is fine): a key type, the base64 key and an
-# optional comment, which is dropped, so it can't add a line or options of its own (plan §5.1 step 6).
-# ssh-keygen -l must accept what's kept.
-ci_key_parse() {
-  local LC_ALL=C label=$1 content tmp ok=''
-  local re="^($CI_KEY_TYPES) ([A-Za-z0-9+/]+={0,2})( [ -~]*)?$"
-  [ "$1" != - ] || label='The key on stdin'
-  if ! content=$(cat -- "$1" 2>/dev/null && printf x); then
-    err "Can't read $1."
-    return 1
-  fi
-  content=${content%x}
-  content=${content%$'\n'}
-  if [[ ! $content =~ $re ]]; then
-    err "$label isn't a single public key line. It must be one line: the key type (ssh-ed25519, ecdsa-sha2-nistp256/384/521, sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com or ssh-rsa), the key, and an optional comment, with no options before it. Use the .pub file ssh-keygen wrote."
-    return 1
-  fi
-  content="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
-  tmp=$(mktemp) || return 1
-  printf '%s\n' "$content" >"$tmp"
-  ssh-keygen -l -f "$tmp" >/dev/null 2>&1 && ok=1
-  rm -f -- "$tmp"
-  if [ -z "$ok" ]; then
-    err "$label isn't a valid public key: ssh-keygen -l refused it."
-    return 1
-  fi
-  printf '%s\n' "$content"
-}
-
-# setup_args <arg>...: only `--ci-key <name> <file | ->`, repeated. Validates every name and key before
-# setup changes anything, and sets CI_NAMES and CI_KEYS. A site may be named once, and only one key may
-# come from stdin.
-setup_args() {
-  local name file key stdin=''
-  CI_NAMES=() CI_KEYS=()
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" != --ci-key ] || [ "$#" -lt 3 ]; then
-      err "$SETUP_USAGE"
-      return 1
-    fi
-    name=$2 file=$3
-    shift 3
-    check_site_name "$name" || return 1
-    if in_list "$name" "${CI_NAMES[@]}"; then
-      err "--ci-key $name is given twice. Give each site one key."
-      return 1
-    fi
-    if [ "$file" = - ]; then
-      if [ -n "$stdin" ]; then
-        err "Only one --ci-key can read its key from stdin (-)."
-        return 1
-      fi
-      stdin=1
-    fi
-    key=$(ci_key_parse "$file") || return 1
-    CI_NAMES+=("$name") CI_KEYS+=("$key")
-  done
-}
-
-# ci_keys_merge <authorized_keys> <name> <line>: prints the ci user's authorized_keys with <line> as
-# the site's key: the marker first, then every other line as it was, with the line ending in
-# ` shipit:<name>` replaced in place (or the new line added last). The file may be missing.
-ci_keys_merge() {
-  local line done=''
-  printf '%s\n' "$CI_KEYS_HEADER"
-  if [ -f "$1" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      if [[ $line == '# managed by shipit'* ]]; then
-        continue
-      elif [[ $line == *" shipit:$2" ]]; then
-        [ -n "$done" ] || printf '%s\n' "$3"
-        done=1
-      else
-        printf '%s\n' "$line"
-      fi
-    done <"$1"
-  fi
-  [ -n "$done" ] || printf '%s\n' "$3"
 }
 
 # ---- Host helpers --------------------------------------------------------------------------------
@@ -378,24 +268,6 @@ setup_dirs() {
   chown root:root "${dirs[@]}"
 }
 
-# Step 3: the ci user (plan §4), which logs in only with a site's key and only runs its forced command.
-# Its password field is `*`, which no password matches; `!` would make sshd refuse key logins too
-# when UsePAM is off. Its home and .ssh are root's, so ci can change nothing there.
-setup_ci_user() {
-  case "$(user_state ci "$CI_COMMENT")" in
-    other)
-      die "A user named ci already exists, and shipit didn't create it, so setup can't use it for CI. Remove or rename that user, then re-run sudo shipit setup."
-      ;;
-    missing)
-      useradd --system --user-group --no-create-home --home-dir "$CI_HOME" --shell "$CI_SHELL" \
-        --password '*' --comment "$CI_COMMENT" ci || die "Creating the user ci failed."
-      log "Created the user ci."
-      ;;
-  esac
-  install -d -m 755 "$CI_HOME" "$CI_HOME/.ssh"
-  chown root:root "$CI_HOME" "$CI_HOME/.ssh"
-}
-
 # Step 4: the root Caddyfile, validated as caddy, then reloaded (never restarted) if it changed.
 setup_caddy() {
   local conf=$CADDY_ETC/Caddyfile out
@@ -456,39 +328,6 @@ setup_auto_upgrades() {
   fi
 }
 
-# Step 6a: ci's one sudoers rule, checked with visudo on a temp copy.
-setup_sudoers() {
-  local conf=$SUDOERS_DIR/shipit-ci
-  may_replace "$conf" \
-    || die "$conf wasn't written by shipit, so setup left it alone. Move it away, then re-run sudo shipit setup."
-  render "$SHIPIT_TEMPLATES/sudoers-ci" SHIPIT_BIN >"$SETUP_TMP/sudoers-ci" || exit 1
-  visudo -cqf "$SETUP_TMP/sudoers-ci" >/dev/null \
-    || die "The ci user's sudoers rule didn't pass visudo -c, so $conf wasn't changed."
-  install -d -m 755 "$SUDOERS_DIR"
-  if install_if_changed "$SETUP_TMP/sudoers-ci" "$conf" 440; then
-    log "Wrote $conf: ci may run only shipit remote."
-  fi
-}
-
-# Step 6b: each --ci-key's line in ci's authorized_keys, replacing that site's old line.
-setup_ci_keys() {
-  local conf=$CI_HOME/.ssh/authorized_keys i CI_SITE CI_KEY
-  [ "${#CI_NAMES[@]}" -gt 0 ] || return 0
-  may_replace "$conf" \
-    || die "$conf wasn't written by shipit, so setup left it alone. Move it away, then re-run sudo shipit setup."
-  if [ -f "$conf" ]; then cp -- "$conf" "$SETUP_TMP/ci-keys"; else : >"$SETUP_TMP/ci-keys"; fi
-  for i in "${!CI_NAMES[@]}"; do
-    # shellcheck disable=SC2034 # CI_KEY is read by render
-    CI_SITE=${CI_NAMES[i]} CI_KEY=${CI_KEYS[i]}
-    render "$SHIPIT_TEMPLATES/authorized_keys" SHIPIT_BIN CI_SITE CI_KEY >"$SETUP_TMP/ci-key" || exit 1
-    ci_keys_merge "$SETUP_TMP/ci-keys" "$CI_SITE" "$(cat "$SETUP_TMP/ci-key")" >"$SETUP_TMP/ci-keys.new"
-    mv -- "$SETUP_TMP/ci-keys.new" "$SETUP_TMP/ci-keys"
-  done
-  if install_if_changed "$SETUP_TMP/ci-keys" "$conf" 644; then
-    log "Wrote $conf: the CI key of ${CI_NAMES[*]}."
-  fi
-}
-
 # Step 7: key-only SSH, only when it can't lock out the person running setup.
 setup_ssh() {
   local conf=$SSH_ETC/sshd_config.d/10-shipit.conf journal reason
@@ -514,18 +353,11 @@ setup_ssh() {
   fi
 }
 
-# Step 8.
-print_known_hosts() {
-  local lines
-  lines=$(known_hosts_lines "$SSH_ETC") \
-    || die "Found no SSH host keys ($SSH_ETC/ssh_host_*_key.pub), so there's nothing to save as VPS_KNOWN_HOSTS. Check that openssh-server is installed."
-  log ''
-  log "$lines"
-  log "Replace <host> with the address CI connects to (use [host]:port if SSH isn't on 22), and save these lines as the GitHub secret VPS_KNOWN_HOSTS."
-}
-
 cmd_setup() {
-  setup_args "$@" || exit 1
+  if [ "$#" -gt 0 ]; then
+    err "$SETUP_USAGE"
+    exit 1
+  fi
   os_supported "$OS_RELEASE" || exit 1
   SETUP_TMP=$(mktemp -d)
   # shellcheck disable=SC2064 # expand SETUP_TMP now
@@ -535,13 +367,9 @@ cmd_setup() {
 
   setup_packages
   setup_dirs
-  setup_ci_user
   setup_caddy
   setup_firewall
   setup_fail2ban
   setup_auto_upgrades
-  setup_sudoers
-  setup_ci_keys
   setup_ssh
-  print_known_hosts
 }

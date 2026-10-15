@@ -31,8 +31,7 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
       the usage.
 - [ ] **Not root.** As a normal user, `shipit deploy x` refuses with "Run this as root, or with sudo:
       …", and `shipit help` still works.
-- [ ] **Setup runs.** `shipit setup` finishes with exit 0 and prints the known_hosts lines and
-      "Replace <host> with …". Save these lines for section 7.
+- [ ] **Setup runs.** `shipit setup` finishes with exit 0.
 - [ ] **Node.js.** `cat /etc/shipit/host.conf` shows `NODE_MAJOR=<the current LTS>`, and
       `node --version` has that major.
 - [ ] **corepack.** `corepack --version` prints the pinned version, and `pnpm --version` works (corepack
@@ -52,9 +51,6 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
 - [ ] **Hardening skipped on a password session.** On a fresh VM, log in as root with a password and
       run setup. It prints "Skipped SSH hardening: …" and `/etc/ssh/sshd_config.d/10-shipit.conf`
       doesn't exist.
-- [ ] **ci user and sudoers.** `getent passwd ci` shows GECOS `shipit ci` and shell `/bin/sh`.
-      `visudo -c` passes. `sudo -l -U ci` lists only `/usr/local/bin/shipit remote *`. *(Ubuntu: this
-      is the sudo-rs check.)*
 - [ ] **Re-run is a no-op.** Run `shipit setup` again. It prints no "Wrote …" or "reloaded" lines, and
       `systemctl show caddy -p ExecMainStartTimestamp` is unchanged.
 - [ ] **Hand-edited Caddyfile.** Change one line of `/etc/caddy/Caddyfile` and remove its marker, then
@@ -165,7 +161,7 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
       - `ls /srv/api2/current /etc/caddy/sites/api2.caddy /etc/systemd/system/shipit-api2.service`
         finds none of them;
       - `id api2` and `/etc/shipit/sites/api2.conf` remain.
-      Fix the app and run the same command again: it deploys. Then remove the site (section 8).
+      Fix the app and run the same command again: it deploys. Then remove the site (section 7).
 
 ## 5. Next.js site (blog)
 
@@ -195,40 +191,11 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
 - [ ] **No previous.** On a site with only one release, rollback prints "<name> has no previous release
       to roll back to."
 
-## 7. CI over SSH
-
-On your laptop: `ssh-keygen -t ed25519 -N '' -f /tmp/ci_docs` and `ssh-keygen -t ed25519 -N '' -f /tmp/ci_api`.
-
-- [ ] **Keys installed.** Run `ssh root@vps 'shipit setup --ci-key docs -' < /tmp/ci_docs.pub`, then the
-      same for `api`. `/home/ci/.ssh/authorized_keys` has one `restrict,command="sudo /usr/local/bin/shipit remote <name>" … shipit:<name>`
-      line per site, and `stat -c '%U:%G %a'` shows `root:root 644` for the file and `755` for the
-      folders.
-- [ ] **Bad key files refused.** A key file with two lines, or one starting with `restrict ` or
-      `command="…"`, is refused, and `authorized_keys` is unchanged.
-- [ ] **Pinned host key.** Write the setup output, with `<host>` replaced, to `/tmp/kh`. Then
-      `ssh -i /tmp/ci_docs -o UserKnownHostsFile=/tmp/kh -o StrictHostKeyChecking=yes ci@<vps> deploy docs`
-      deploys, streaming the build. *(Ubuntu: this shows sudo-rs keeps `SSH_ORIGINAL_COMMAND`.)*
-- [ ] **Wrong host key fails.** Change one character of the key in `/tmp/kh`. The same command fails
-      with a host key error.
-- [ ] **One site per key.** `… -i /tmp/ci_docs … ci@<vps> deploy api` and `… rollback api` are both
-      refused ("This key belongs to the site docs, …").
-- [ ] **Hostile refs refused.** `deploy docs --upload-pack=x`, `'deploy docs main; id'`,
-      `deploy docs $(id)` and a plain interactive `ssh … ci@<vps>` are all refused.
-- [ ] **Rollback from CI.** `… -i /tmp/ci_docs … ci@<vps> rollback docs` works.
-- [ ] **No first deploys from CI.** A key for a site that was never deployed is refused ("… Its first
-      deploy must be run by hand, as root …").
-- [ ] **A non-22 port.** Add `Port 2222` to an sshd drop-in, `systemctl reload ssh`, and re-run
-      `shipit setup`. `ufw status` now allows 2222. `ssh -p 2222 …` works (use `[<vps>]:2222` in
-      `/tmp/kh`).
-- [ ] **GitHub Actions.** In the docs repo, add the four secrets and `examples/deploy.yml` (with
-      `blog` → `docs`). A push deploys, and the Actions log shows the build. A push with a failing
-      build makes the run fail. `examples/rollback.yml`, run from the Actions tab, rolls back.
-
-## 8. Removing a site
+## 7. Removing a site
 
 - [ ] **Clean removal.** Follow README "Removing a site" for `docs`. Afterwards no
       `docs`/`docs-build` users remain, nothing under `/srv/docs`, `/etc/caddy/sites/docs.caddy` or
-      `/etc/shipit/sites/docs.*`, and no `shipit:docs` line. Other sites still work. The same name can
+      `/etc/shipit/sites/docs.*`. Other sites still work. The same name can
       be deployed again from scratch.
 
 ## Recording the result

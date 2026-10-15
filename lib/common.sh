@@ -36,12 +36,6 @@ FAIL2BAN_ETC=/etc/fail2ban
 # Root's home, for .ssh/authorized_keys.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 ROOT_HOME=/root
-# The ci user's home (root-owned): .ssh/authorized_keys holds one forced-command line per site key.
-# shellcheck disable=SC2034 # used by the command libraries that source this file
-CI_HOME=/home/ci
-# Where setup writes shipit-ci, the ci user's one sudoers rule.
-# shellcheck disable=SC2034 # used by the command libraries that source this file
-SUDOERS_DIR=/etc/sudoers.d
 
 # Where render's templates live: templates/ next to lib/, in a checkout and when installed.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
