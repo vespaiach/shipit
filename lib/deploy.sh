@@ -322,7 +322,8 @@ site_apply_config() {
 
 # ---- A. Resolve the site -------------------------------------------------------------------------
 
-# site_dir <path> <owner:group> <mode>
+# site_dir <path> <owner:group> <mode>. A folder under a setgid one inherits the bit, and GNU chmod
+# keeps it for a 3- or 4-digit mode, so modes without it are given with 5 digits (00700).
 site_dir() {
   if ! mkdir -p -- "$1" || ! chown -- "$2" "$1" || ! chmod -- "$3" "$1"; then
     die "Couldn't set up $1."
@@ -357,9 +358,9 @@ site_users() {
 site_dirs() {
   site_dir "$SITE_DIR" "root:$SITE" 2750
   site_dir "$SITE_DIR/releases" "root:$SITE" 2750
-  site_dir "$SITE_DIR/home" "$BUILD_USER:$SITE" 700
-  site_dir "$SITE_DIR/.ssh" "$BUILD_USER:$SITE" 700
-  site_dir "$SITE_DIR/repo.git" "$BUILD_USER:$SITE" 700
+  site_dir "$SITE_DIR/home" "$BUILD_USER:$SITE" 00700
+  site_dir "$SITE_DIR/.ssh" "$BUILD_USER:$SITE" 00700
+  site_dir "$SITE_DIR/repo.git" "$BUILD_USER:$SITE" 00700
   site_dir "$LOG_ROOT/$SITE" caddy:caddy 750
 }
 
