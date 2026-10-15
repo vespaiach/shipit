@@ -27,8 +27,22 @@ in step with the code.
   `known_hosts_lines`, `may_replace`; steps `setup_packages` (`setup_host_conf`, `setup_apt_repos`,
   `setup_corepack`), `setup_dirs`, `setup_caddy`, `setup_firewall`, `setup_fail2ban`,
   `setup_auto_upgrades`, `setup_ssh`, `print_known_hosts`, called in order by `cmd_setup`.
+  `lib/deploy.sh` (sources `lib/config.sh`): helpers `deploy_args`, `same_repo`, `default_branch`,
+  `install_default`, `build_default`, `missing_env_keys`, `release_name`/`release_sha`,
+  `path_resolve`, `static_root_check`, `prune_releases`, `prune_refs`, `site_user_state`; the
+  sh scripts `ENV_EXEC` (exports the env file read on stdin, then runs a command) and `RUN_IN`;
+  `as_build` (every repo command, as `<name>-build`, `env -i`, umask 027, locks dropped),
+  `git_remote`/`git_build`, `site_ini`, `link_target`; Caddy: `render_site_caddy` (log snippet +
+  type block + alias blocks), `site_caddy_install`, and `site_apply_config` (plan §5.5: render from
+  `current`, install, write TYPE/DOMAIN/ALIASES; shared with revert and rollback); steps
+  `deploy_resolve` (A.1), `deploy_access` (A.2), `deploy_fetch` (A.3), `deploy_build` (B),
+  `deploy_switch` (C.1), `deploy_config` (C.2, with `deploy_revert`, C.4), `deploy_prune` (D), called
+  in order by `cmd_deploy`. `deploy_supported_type` (refuses node/nextjs) and the `*)` branch of
+  `site_apply_config` are where M4 adds node and Next.js.
 - `templates/` — what `render` fills in: `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
-  `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`.
+  `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`, and a site's Caddy
+  file in parts: `site-log.caddy` (marker + log snippet), `site-static.caddy`, `site-alias.caddy` (one
+  per alias). `github_known_hosts` is copied data (GitHub's SSH host keys, used by git's ssh as is).
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`), `test/golden/` (expected
   rendered output), `test/fixtures/`.
@@ -45,14 +59,19 @@ in step with the code.
   (`/etc/ssh`), `FAIL2BAN_ETC` (`/etc/fail2ban`), `ROOT_HOME` (`/root`) and `SHIPIT_TEMPLATES`
   (`templates/` next to `lib/`). Never read them from the environment or add flags for them; tests
   reassign them after sourcing. Lock helpers take the lock path. Tests stub commands such as `id`,
-  `mv`, `systemctl`, `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl` and `dpkg-query`
-  through `PATH`, so call commands by name (no absolute paths, no `$EUID`).
+  `mv`, `systemctl`, `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`,
+  `useradd`, `getent`, `chown` and `setfacl` through `PATH`, so call commands by name (no absolute
+  paths, no `$EUID`). Deploy tests run git for real: the stubbed `runuser` runs commands as the test
+  user, `BUILD_PATH` (lib/deploy.sh) gets the stubs prepended, and `url.<local repo>.insteadOf` in
+  the build user's `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value read from a config or `shipit.ini`, or typed by a person, before
   using it.
 - **Root never runs or sources repo code.** It reads repo files as data only (`shipit.ini` through
-  `git config`, never sourced). Repo commands (fetch, install, build) run as `<name>-build`, and the
-  site's process as `<name>`. Secrets reach the build on stdin, never on a command line.
+  `git config`, never sourced; `git show`/`git ls-tree` output of the build user's git, parsed with
+  `jq` or exact matches). Repo commands (fetch, install, build) run as `<name>-build` through
+  `as_build`, and the site's process as `<name>`. Secrets reach the build on stdin, never on a
+  command line.
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
   printing nothing, on an unset or empty variable. Never `sed` values into files.
 - **Validate on a temp copy, then install**: render to a temp file, check it (`visudo -cf`,
@@ -79,8 +98,9 @@ in step with the code.
 
 ## Making a change
 
-Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`) and M2
-(`shipit setup`, without `--ci-key`, which comes with M6) are implemented; M3–M7 are to do.
+Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`), M2
+(`shipit setup`, without `--ci-key`, which comes with M6) and M3 (`shipit deploy` for static sites)
+are implemented; M4–M7 are to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.
