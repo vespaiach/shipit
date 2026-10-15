@@ -31,9 +31,10 @@ manual) and this file in step with the code.
   `setup_firewall`, `setup_fail2ban`, `setup_auto_upgrades`, `setup_sudoers`, `setup_ci_keys`,
   `setup_ssh`, `print_known_hosts`. Constants: `COREPACK_VERSION`, `PACKAGES`, `SHIPIT_BIN`.
 - `lib/deploy.sh` (sources `config.sh`) — plan §5.2. Helpers: `deploy_args`, `same_repo`,
-  `default_branch`, `install_default`, `build_default`, `missing_env_keys`, `release_name`,
-  `release_sha`, `path_resolve`, `static_root_check`, `prune_releases`, `prune_refs`, `link_target`;
-  the sh scripts `ENV_EXEC` (parses the env file on stdin, exports it, runs a command) and `RUN_IN`;
+  `default_branch`, `install_default`, `build_default`, `missing_env_keys`, `env_file_check` (root's
+  parse-only check of the env file), `release_name`, `release_sha`, `path_resolve`,
+  `static_root_check`, `prune_releases`, `prune_refs`, `link_target`; the sh scripts `ENV_EXEC` (as
+  `<name>-build`: parses the env file on stdin, exports it, runs a command) and `RUN_IN`;
   `as_build` (every repo command as `<name>-build`: `env -i`, umask 027, locks closed), `git_remote`,
   `git_build`, `site_ini`. Config: `render_site_caddy`, `site_caddy_check`, `site_caddy_install`,
   `render_site_unit`, `site_unit_check`, `site_unit_install`, `site_unit_remove`,

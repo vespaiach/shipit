@@ -46,6 +46,8 @@ cmd_rollback() {
   # caddy validates the site's Caddy file from here as the caddy user. Nothing in it is secret.
   chmod 755 "$DEPLOY_TMP"
 
+  # An unknown site is refused before the lock, so it leaves no lock file behind.
+  [ -e "$SHIPIT_ETC/sites/$SITE.conf" ] || site_conf_read "$SITE" || exit 1
   site_lock
   site_conf_read "$SITE" || exit 1
   [ -n "$CONF_TYPE" ] || die "$SITE has never been deployed successfully, so there's nothing to roll back to."
