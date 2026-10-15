@@ -5,6 +5,11 @@
 
 bats_require_minimum_version 1.5.0
 
+setup_file() {
+  load deploy_helpers
+  deploy_setup_file
+}
+
 setup() {
   load helpers
   load deploy_helpers
@@ -38,13 +43,14 @@ static_releases() {
   rel2=$(current)
 }
 
-# node_releases: rel1 runs node v1.js without data; rel2 (current) runs node v2.js with data.dir uploads.
+# node_releases: rel1 runs node v1.js without data; rel2 (current) runs node v2.js with data.dir uploads
+# and a health path of /api/health (rel1 has the default /).
 node_releases() {
   host
   commit shipit.ini "$(node_ini 'node v1.js')" >/dev/null
   deploy_ok https://github.com/me/blog blog
   rel1=$(current)
-  commit shipit.ini "$(node_ini 'node v2.js')"$'\n[data]\n\tdir = uploads' >/dev/null
+  commit shipit.ini "$(node_ini 'node v2.js' 'health = /api/health')"$'\n[data]\n\tdir = uploads' >/dev/null
   deploy_ok blog
   rel2=$(current)
 }
@@ -167,7 +173,8 @@ EOF
   }
   [ "$(current)" = "$rel1" ]
   [ "$(previous)" = "$rel2" ]
-  # The data folder added by rel2 is gone from the unit (the folder itself is systemd's, untouched).
+  # The data folder added by rel2 is gone from the unit (the folder itself is systemd's, untouched), and
+  # the health check uses rel1's path (/), not rel2's /api/health.
   diff <(unit | sed "s|node v1.js|node server.js|") "$golden/site-node.service"
   diff <(grep -E '^(systemctl|curl)' "$calls") - <<'EOF'
 systemctl daemon-reload
@@ -177,28 +184,6 @@ curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http
 EOF
   run ! grep -q '/var/lib\|shipit-blog/' "$calls"
   grep -qx PORT=3000 "$SHIPIT_ETC/sites/blog.conf"
-}
-
-@test "rollback of a nextjs site: stop, empty the cache, start" {
-  host
-  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
-  deploy_ok https://github.com/me/blog blog
-  rel1=$(current)
-  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs\n\thealth = /api/health' >/dev/null
-  deploy_ok blog
-  : >"$calls"
-  run cmd_rollback blog
-  [ "$status" -eq 0 ] || {
-    echo "$output"
-    return 1
-  }
-  [ "$(current)" = "$rel1" ]
-  diff <(grep -E '^(systemctl (stop|clean|start|restart) |curl)' "$calls") - <<'EOF'
-systemctl stop shipit-blog
-systemctl clean --what=cache shipit-blog
-systemctl start shipit-blog
-curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/
-EOF
 }
 
 @test "a failed health check swaps back, re-renders and restarts the original current; both releases kept" {

@@ -54,8 +54,8 @@ manual) and this file in step with the code.
 - `test/unit/` — bats: one `.bats` per library or concern (`dispatcher`, `validators`, `render`,
   `files`, `locks`, `config`, `setup`, `deploy`, `rollback`). `helpers.bash` (sources
   `common.sh` with paths in a temp dir; `stub`; `atomic_mv`) and `deploy_helpers.bash` (the temp-root
-  harness for `deploy.bats` and `rollback.bats`: `deploy_setup`, `host`, `commit`, `ini`, `node_ini`,
-  `curl_codes`, ...). `test/golden/` holds expected rendered output; `test/fixtures/` the `shipit.ini`
+  harness for `deploy.bats` and `rollback.bats`: `deploy_setup_file` (the shared host-command stubs, written once per file in `setup_file`),
+  `deploy_setup`, `host`, `commit`, `ini`, `node_ini`, `curl_codes`, ...). `test/golden/` holds expected rendered output; `test/fixtures/` the `shipit.ini`
   cases, SSH keys, an sshd journal, a Node release index and a `render` template.
 - `Makefile`, `.github/workflows/check.yml` (CI runs `make`).
 
@@ -104,9 +104,9 @@ manual) and this file in step with the code.
 
 - `shfmt -i 2 -ci -bn` formatting, shellcheck clean. Disable a check only on the line that needs it,
   with a reason.
-- `make` = `make lint` (bash -n, shellcheck, shfmt) + `make test` (bats). GitHub Actions runs it on
+- `make` = `make lint` (bash -n, shellcheck, shfmt) + `make test` (`bats --jobs 4`, so every test must use only its own `$BATS_TEST_TMPDIR`). GitHub Actions runs it on
   every push to `main` and every PR (Ubuntu, not as root); it passing is the gate before merging. On
-  macOS, install `bash`, `bats-core`, `shellcheck`, `shfmt`, `gettext` and `flock` with Homebrew
+  macOS, install `bash`, `bats-core`, `shellcheck`, `shfmt`, `gettext`, `flock` and `parallel` with Homebrew
   (`/bin/bash` is 3.2). Tests that need a missing tool or root skip with a stated reason, or stub it
   (macOS `mv` has no `-T`, so `atomic_mv` stubs it).
 - Every rendered template gets a golden file in `test/golden/` and a test comparing against it.
