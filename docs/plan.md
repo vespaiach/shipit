@@ -147,8 +147,9 @@ Quirks to know when writing `shipit.ini`:
 
 Secrets are **never** in the repo. They live on the server in `/etc/shipit/sites/<name>.env`
 (`KEY=value` lines, mode 600 `root:root`, format in decision 42), edited by the admin over SSH. The
-service gets them via `EnvironmentFile=`, which systemd reads as root before switching to `<name>`,
-so neither site user can read the file. Root passes it to the build step on stdin. The install step
+service gets them via `EnvironmentFile=-` (the `-`: a site that needs no secrets needs no file,
+decision 53), which systemd reads as root before switching to `<name>`, so neither site user can read
+the file. Root passes it to the build step on stdin. The install step
 doesn't get it, so dependencies' install scripts never see secrets; a private npm registry that needs
 a token at install time isn't supported.
 
@@ -351,7 +352,8 @@ A. **Resolve the site** (site lock taken)
         supported."
       - Check `site.domain` and every `site.alias` against every other site's DOMAIN and ALIASES in
         `/etc/shipit/sites/*.conf`. A clash fails the deploy. A first `node`/`nextjs` deploy is given a PORT (decision 39): the lowest
-        from 3000–3999 that no `<name>.conf` has. TYPE, DOMAIN and ALIASES are written to `<name>.conf` only in C.2, so the conf
+        from 3000–3999 that no `<name>.conf` has, picked at the start of B, under `build.lock`, and
+        written to `<name>.conf` next to REPO at once (decision 50). TYPE, DOMAIN and ALIASES are written to `<name>.conf` only in C.2, so the conf
         always describes `current`.
 B. **Build** (`build.lock` taken, after the site lock; repo commands run as `<name>-build`)
    1. Root creates `releases/<UTC>-<full sha>` (decision 40) and hands it to `<name>-build`, which
@@ -360,8 +362,9 @@ B. **Build** (`build.lock` taken, after the site lock; repo commands run as `<na
    2. Run install (without secrets), then build (with the env file on stdin). A failure deletes the
       half-built release and leaves the live site untouched. Defaults, and how the commands run:
       decision 41.
-   3. `nextjs` only: replace `.next/cache` (the build cache) with a symlink to
-      `/var/cache/shipit-<name>`, so `next start` can write its image and ISR cache (section 6).
+   3. `nextjs` only: as `<name>-build`, replace `.next/cache` (the build cache) with a symlink to
+      `/var/cache/shipit-<name>` (`rm -rf .next/cache && ln -s ...`), so `next start` can write its
+      image and ISR cache (section 6).
    4. Root kills any process `<name>-build` left running (`pkill -KILL -u <name>-build`), then takes
       the release back (`chown -R root:<name>`). `static` only: refuse the release if
       `<root>` contains a symlink pointing outside `<root>`, then set Caddy's ACLs (section 4).
@@ -370,13 +373,15 @@ C. **Switch** (site lock still held)
    1. Remember where `previous` points, then `previous` → old `current`; `current` → new release (both
       atomic).
    2. Render the Caddy file and unit from the `shipit.ini` of the new `current` (section 5.5) and
-      validate them, then write TYPE, DOMAIN and ALIASES to `<name>.conf`. Reload (never restart)
-      Caddy if the Caddy file changed; `daemon-reload` if the unit changed (including `data.dir`); on
-      a first deploy, `systemctl enable` the unit so the site comes back after a reboot. If rendering
-      or validating fails, revert (step 4) and exit non-zero.
+      validate both (decision 54) before installing either, then write TYPE, DOMAIN and ALIASES to
+      `<name>.conf`. The unit goes in first: `daemon-reload` if it changed (including `data.dir`),
+      and `systemctl enable` it so the site comes back after a reboot (on every deploy: it's
+      idempotent, decision 55). Then reload (never restart) Caddy if the Caddy file changed. If
+      rendering, validating or installing fails, revert (step 4) and exit non-zero.
    3. Node/Next.js: restart `shipit-<name>` (`nextjs`: stop, `systemctl clean --what=cache`, start, so
       a release never sees another release's cache), then poll `http://127.0.0.1:$PORT$health` with
-      `Host: $domain` for up to 60 s. Static: nothing restarts; Caddy is reloaded only if its file
+      `Host: $domain` every second for up to 60 s (decision 56). A failed restart counts as a failed
+      health check. Static: nothing restarts; Caddy is reloaded only if its file
       changed in step 2, and otherwise resolves the `current` symlink per request. When the Caddy file
       changes (e.g. `static.root`), requests between step 1 and the reload in step 2 can get a 404, a
       window well under a second. Accepted.
@@ -386,10 +391,11 @@ C. **Switch** (site lock still held)
       failed release, exit non-zero ("Deploy failed health check; still serving <old release>.").
       A failed render says "Deploy failed: the new release's config couldn't be installed; still
       serving <old release>." instead (decision 47).
-      On a first deploy there's nothing to go back to: stop and disable the unit, remove `current`,
-      the Caddy file (reload Caddy) and the release, and keep the users and `<name>.conf`, so running
-      the same deploy again starts over; exit non-zero ("First deploy of <name> failed; nothing is
-      served.").
+      The restored release is restarted and health-checked after a failed render too (decision 58).
+      On a first deploy there's nothing to go back to: stop and disable the unit and delete it
+      (`daemon-reload`), remove `current`, the Caddy file (reload Caddy) and the release, and keep
+      the users and `<name>.conf` (back to REPO and PORT, decision 57), so running the same deploy
+      again starts over; exit non-zero ("First deploy of <name> failed; nothing is served.").
 D. **Prune**: delete every release that isn't `current` or `previous`, and its `refs/shipit/<sha>`
    (unless a kept release has the same SHA; any other pin, e.g. from a failed build, goes too).
    Release the site lock and print "Deployed <name>: now serving <release>."
@@ -513,15 +519,19 @@ name, which only root sets and the build user can't rename, and the commit is pi
   `/var/log/shipit/<name>/access.log` with `roll_size 10MiB`, `roll_keep 10` and `format filter`
   cutting query strings), then the site block, then one `site-alias.caddy` block per alias
   (`redir https://<domain>{uri} 308`, same snippet), each rendered on its own (decision 46).
-- `site-proxy.caddy` — `reverse_proxy 127.0.0.1:<port>`, `encode`, headers, and the same `log` block.
-- `site.service` — `User=<name>`, `WorkingDirectory=/srv/<name>/current`,
-  `EnvironmentFile=/etc/shipit/sites/<name>.env`, `Environment=NODE_ENV=production PORT=<port>`,
+- `site-proxy.caddy` — `reverse_proxy 127.0.0.1:<port>`, `encode zstd gzip`, the headers of
+  decision 44, and the same `log` snippet; rendered between `site-log.caddy` and the alias blocks, as
+  `site-static.caddy` is.
+- `site.service` — `User=<name>`, `Group=<name>`, `WorkingDirectory=/srv/<name>/current`,
+  `EnvironmentFile=-/etc/shipit/sites/<name>.env`, `Environment=NODE_ENV=production PORT=<port>`,
   `ExecStart=/bin/sh -c '<start>'`, `Restart=on-failure`, hardening (`NoNewPrivileges`,
-  `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `SocketBindAllow=tcp:<port>` with
-  `SocketBindDeny=any`, so a site can't take another site's port while it restarts), logs to the
-  journal. With `[data]`: `StateDirectory=shipit-<name>` plus one `shipit-<name>/<dir>` per
-  `data.dir`, and `StateDirectoryMode=0700`. `nextjs`: `CacheDirectory=shipit-<name>`,
-  `CacheDirectoryMode=0700`.
+  `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, the extras of decision 52,
+  `SocketBindAllow=tcp:<port>` with `SocketBindDeny=any`, so a site can't take another site's port
+  while it restarts), logs to the journal; `WantedBy=multi-user.target`. With `[data]`,
+  `site-data.service` adds `StateDirectory=shipit-<name>` plus one `shipit-<name>/<dir>` per
+  `data.dir`, and `StateDirectoryMode=0700`. `nextjs`: `site-nextjs.service` adds
+  `CacheDirectory=shipit-<name>`, `CacheDirectoryMode=0700` (decision 51). Installed as
+  `/etc/systemd/system/shipit-<name>.service`.
 - `sshd.conf` (the drop-in), `sudoers-ci`, `authorized_keys` line (one per site key),
   `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's SSH host keys, copied, not
   rendered).
@@ -562,7 +572,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M1 | `shipit.ini` parser + validators | bats (fixtures for every key and error, including an unknown key, a duplicate single-value key, an `[include]` attempt, an unquoted `#` in a value, an invalid `data.dir` (`../x`, `a/b`), `[data]` on a static site, a first-deploy name that differs from `site.name`, a `node.start` with `\n`, `'` or `%`, a `static.root` of `../x`, a `site.health` with a space, and a ref starting with `-`) |
 | M2 | `setup` (incl. SSH hardening, firewall) | bats (golden files for every rendered file) |
 | M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
-| M4 | `deploy` node / nextjs + health check + auto-revert + data folder | bats (golden `site-proxy.caddy` and `site.service`) |
+| M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
 | M5 | `rollback` | bats |
 | M6 | `remote` + CI user + GitHub Actions example | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten | review |
@@ -605,7 +615,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 32 | ufw defaults | **Deny incoming, allow outgoing**, then allow sshd's ports (each `port N` line of `sshd -T`, as `N/tcp`; any malformed `port` line stops setup before ufw is touched), 80/tcp, 443/tcp and 443/udp, then `ufw --force enable`. Re-running is safe: ufw skips rules it already has. Ports opened by hand are kept. |
 | 33 | Caddyfile global options | **Only `admin localhost:2019`** (Caddy's default, written out so the reload path is explicit). No ACME email: Caddy gets certificates without one. |
 | 34 | Test seams for setup | **Plain constants in `lib/common.sh`**: `OS_RELEASE` (`/etc/os-release`), `APT_ETC` (`/etc/apt`), `CADDY_ETC` (`/etc/caddy`), `LOG_ROOT` (`/var/log/shipit`), `SSH_ETC` (`/etc/ssh`: the drop-in folder and host keys), `FAIL2BAN_ETC` (`/etc/fail2ban`) and `ROOT_HOME` (`/root`), next to `SHIPIT_ETC`, `SHIPIT_VAR` and `SRV_ROOT`. Tests point them at a temp dir and stub `apt-get`, `systemctl`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`, `chown` and the rest through `PATH`. |
-| 35 | Test seams for deploy | **None new.** Paths come from the existing constants (`SRV_ROOT`, `SHIPIT_ETC`, `SHIPIT_VAR`, `CADDY_ETC`, `LOG_ROOT`; `github_known_hosts` is found through `SHIPIT_TEMPLATES`). Tests point `https://github.com/<owner>/<repo>` at a local repo with `url.<path>.insteadOf` in the build user's `~/.gitconfig` (its HOME is `$SRV_ROOT/<name>/home`), stub `runuser` to run the command as themselves, and prepend their stubs to `BUILD_PATH` (a plain constant in `lib/deploy.sh`). |
+| 35 | Test seams for deploy | **Only `SYSTEMD_DIR` and `CACHE_ROOT` (M4, decision 59), and the health check's timing.** Paths come from the existing constants (`SRV_ROOT`, `SHIPIT_ETC`, `SHIPIT_VAR`, `CADDY_ETC`, `LOG_ROOT`; `github_known_hosts` is found through `SHIPIT_TEMPLATES`). Tests point `https://github.com/<owner>/<repo>` at a local repo with `url.<path>.insteadOf` in the build user's `~/.gitconfig` (its HOME is `$SRV_ROOT/<name>/home`), stub `runuser` to run the command as themselves, and prepend their stubs to `BUILD_PATH` (a plain constant in `lib/deploy.sh`). |
 | 36 | Site users | **`<name>`**: `useradd --system --user-group`, home `/nonexistent`, shell `/usr/sbin/nologin`. **`<name>-build`**: `--system`, primary group `<name>` (no group of its own), home `/srv/<name>/home`, `nologin`. A user is shipit's when its GECOS field is exactly `shipit site <name>` / `shipit build <name>`; an existing user with either name and any other GECOS refuses the first deploy before anything is created. Existing shipit users are kept, so a rerun resumes. |
 | 37 | Default branch, ref resolution | **The remote's `HEAD`, read with `git ls-remote --symref <url> HEAD`** each time the ref is left out (its name must pass `check_ref`), then used as `refs/heads/<branch>`. Any ref resolves in `repo.git` with `rev-parse --verify --end-of-options <ref>^{commit}`, so a branch, a tag or the SHA of a fetched (or pinned) commit works. |
 | 38 | Transport after the first deploy | **SSH if `/srv/<name>/.ssh/id_ed25519` exists, else HTTPS**, without probing. Before the first success, a repo that answers over HTTPS is public and a key left by an earlier try is deleted, so a public site never switches to SSH. A public repo that later turns private: create the key as `<name>-build` (`ssh-keygen -t ed25519 -N '' -f /srv/<name>/.ssh/id_ed25519`) and add it to GitHub. SSH runs as `ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<templates>/github_known_hosts -o GlobalKnownHostsFile=/dev/null`; the key's comment is `shipit-<name>`. |
@@ -620,3 +630,13 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 47 | Render failure message | **"Deploy failed: the new release's config couldn't be installed; still serving <release>."** (the health-check message would be wrong). If re-rendering the restored release fails too, that's printed as well, and the deploy still exits non-zero. A first deploy prints "First deploy of <name> failed; nothing is served." either way. |
 | 48 | URL form for a known site | **Matches when it names the same `<owner>/<repo>`**, ignoring letter case (GitHub does) and `.git`. REPO keeps the URL of the first deploy. |
 | 49 | Waiting for `build.lock` | **Prints "Another site is building; waiting."** (it can only be another site: the site lock is held). |
+| 50 | When a first deploy gets its PORT | **At the start of B, right after `build.lock` is taken, and written to `<name>.conf` (REPO and PORT; valid by section 4's rules) before the lock is let go.** Every deploy takes `build.lock`, so two first deploys of different sites can't pick the same port, and no extra lock is needed. A failed first deploy keeps its PORT, so a rerun gets the same one. Later deploys keep PORT; only a site with no PORT yet gets one. |
+| 51 | The unit's variable parts | **Rendered one at a time and concatenated, as for the Caddy file (decision 46)**: `site.service` (marker, `[Unit]`, `[Install]`, then `[Service]` last), then `site-data.service` when `data.dir` is set (`STATE_DIRS` is computed from the validated `data.dir` values: `shipit-<name> shipit-<name>/<dir>...`), then `site-nextjs.service` for `nextjs`. The parts after the first only add lines to `[Service]`, which is why `[Install]` comes before it (systemd doesn't mind the order). `render` stays the only templating. |
+| 52 | Extra hardening in the unit | **`PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictSUIDSGID` and `LockPersonality`**, on top of section 6's list. Nothing that breaks Node: no `MemoryDenyWriteExecute` (V8 JIT-compiles), no syscall filter. |
+| 53 | A site without an env file | **`EnvironmentFile=-...`**: the unit starts without one. A site that needs secrets lists them as `site.env`, and deploy fails before building when they're missing, so the `-` never hides a missing secret that shipit.ini names. |
+| 54 | Checking the unit | **`systemd-analyze verify <temp>/unit/shipit-<name>.service`** (verify needs a unit's name; it doesn't need the user or the working directory to exist), and an installed `shipit-<name>.service` without the marker is refused, not replaced. The Caddy file and the unit are both checked before either is installed. |
+| 55 | `systemctl enable` | **On every deploy, revert and rollback**, not only the first: it's idempotent and keeps no state about which deploy is the first. |
+| 56 | Health check | **`curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: <domain>" http://127.0.0.1:<port><health>`, every second until `health_ok` accepts the status or 60 s have passed** (`HEALTH_TIMEOUT`, `HEALTH_INTERVAL`, `HEALTH_MAX_TIME` in `lib/deploy.sh`; tests shorten them). Redirects aren't followed, so `/` redirecting to a login page passes without `site.health`. On failure it prints the URL, the last status (or "gave no answer") and `journalctl -u shipit-<name>`. `site_restart_and_check` (restart + health check) is shared by deploy, revert and rollback. |
+| 57 | What a failed first deploy keeps | **The users and `<name>.conf` with REPO and PORT**: TYPE, DOMAIN and ALIASES (written in C.2) are removed again, so the rerun is a first deploy (access probe, name check) and the domain isn't held. The unit is stopped, disabled and deleted (then `daemon-reload`), not only stopped and disabled, so no unit is left pointing at a missing `current`. |
+| 58 | Restart after a failed render | **The restored release is restarted and health-checked whatever made the deploy fail**, as C.4 says, even though a failed render never restarted the new one (a short gap). If that fails too, it's printed and the deploy still exits non-zero. |
+| 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. |

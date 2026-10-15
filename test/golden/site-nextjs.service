@@ -1,0 +1,36 @@
+# managed by shipit: the systemd unit of the site blog. shipit deploy and rollback write it from the
+# shipit.ini of the release /srv/blog/current points at; edits here are lost.
+[Unit]
+Description=shipit site blog
+After=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+User=blog
+Group=blog
+WorkingDirectory=/srv/blog/current
+# The site's secrets, read by systemd as root. A site that has none needs no file.
+EnvironmentFile=-/etc/shipit/sites/blog.env
+Environment=NODE_ENV=production PORT=3000
+ExecStart=/bin/sh -c './node_modules/.bin/next start -p $PORT'
+Restart=on-failure
+# Output goes to the journal: journalctl -u shipit-blog
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# The site may listen on its own port only, so it can't take another site's while that one restarts.
+SocketBindAllow=tcp:3000
+SocketBindDeny=any
+# Next.js's runtime cache, /var/cache/shipit-blog: the release's .next/cache links to it, and it's
+# emptied on every switch.
+CacheDirectory=shipit-blog
+CacheDirectoryMode=0700

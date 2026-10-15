@@ -16,6 +16,12 @@ SRV_ROOT=/srv
 CADDY_ETC=/etc/caddy
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 LOG_ROOT=/var/log/shipit
+# Where a node/nextjs site's unit goes: $SYSTEMD_DIR/shipit-<name>.service.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+SYSTEMD_DIR=/etc/systemd/system
+# systemd's CacheDirectory= root: a Next.js release's .next/cache links to $CACHE_ROOT/shipit-<name>.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+CACHE_ROOT=/var/cache
 # Host files setup reads or writes (plan §5.1).
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 OS_RELEASE=/etc/os-release

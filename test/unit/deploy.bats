@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # shellcheck disable=SC2016,SC2034,SC2030,SC2031,SC2153 # single-quoted stub bodies; tests set lib variables, each in its own @test subshell
-# lib/deploy.sh (plan §5.2): the site Caddy file against golden files, the small parsers and checks
-# deploy uses, and whole deploys of a static site in a temp root: git runs for real against a local
-# repo (the build user's ~/.gitconfig points the GitHub URL at it), the host commands are stubs.
+# lib/deploy.sh (plan §5.2): the site Caddy file and unit against golden files, the small parsers and
+# checks deploy uses, the health check and restart, and whole deploys of static, node and Next.js
+# sites in a temp root: git runs for real against a local repo (the build user's ~/.gitconfig points
+# the GitHub URL at it), the host commands are stubs.
 
 bats_require_minimum_version 1.5.0
 
@@ -15,7 +16,8 @@ setup() {
   tpl=$REPO_ROOT/templates
   CADDY_ETC=$BATS_TEST_TMPDIR/caddy
   LOG_ROOT=$BATS_TEST_TMPDIR/log
-  mkdir -p "$SHIPIT_ETC/sites" "$CADDY_ETC/sites" "$LOG_ROOT"
+  SYSTEMD_DIR=$BATS_TEST_TMPDIR/systemd
+  mkdir -p "$SHIPIT_ETC/sites" "$CADDY_ETC/sites" "$LOG_ROOT" "$SYSTEMD_DIR"
 }
 
 need_envsubst() { command -v envsubst >/dev/null || skip "envsubst (gettext-base) isn't installed"; }
@@ -63,11 +65,92 @@ static_ini_values() {
   [ "$status" -eq 1 ]
 }
 
-@test "both golden site files pass caddy validate" {
+# proxy_ini_values: what render_site_caddy and render_site_unit read for a node site on port 3000.
+proxy_ini_values() {
+  SITE=blog SRV_ROOT=/srv LOG_ROOT=/var/log/shipit SHIPIT_ETC=/etc/shipit
+  INI_DOMAIN=blog.example.com INI_ALIASES=() INI_TYPE=node INI_START='node server.js' INI_DIRS=()
+  CONF_PORT=3000 PORT=3000
+}
+
+@test "site-proxy.caddy: log snippet, a reverse proxy to the site's port, no alias blocks" {
+  need_envsubst
+  proxy_ini_values
+  run render_site_caddy site-proxy.caddy PORT
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") "$golden/site-proxy.caddy"
+  [[ $output == *$'\treverse_proxy 127.0.0.1:3000\n'* ]]
+  [[ $output != *'redir https'* ]]
+}
+
+@test "site-proxy.caddy with two aliases" {
+  need_envsubst
+  proxy_ini_values
+  INI_ALIASES=(www.blog.example.com blog.example.org)
+  run render_site_caddy site-proxy.caddy PORT
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") "$golden/site-proxy-aliases.caddy"
+  [ "$(grep -c 'import shipit-blog-log' <<<"$output")" -eq 3 ]
+}
+
+@test "site.service for a node site without data" {
+  need_envsubst
+  proxy_ini_values
+  run render_site_unit
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") "$golden/site-node.service"
+  is_shipit_file "$golden/site-node.service"
+  [[ $output != *StateDirectory* && $output != *CacheDirectory* ]]
+}
+
+@test "site.service for a node site with two data.dir entries" {
+  need_envsubst
+  proxy_ini_values
+  INI_DIRS=(uploads db)
+  run render_site_unit
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") "$golden/site-node-data.service"
+  grep -qx 'StateDirectory=shipit-blog shipit-blog/uploads shipit-blog/db' "$golden/site-node-data.service"
+}
+
+@test "site.service for a nextjs site: the default start and a cache folder" {
+  need_envsubst
+  proxy_ini_values
+  INI_TYPE=nextjs INI_START=$INI_NEXTJS_START
+  run render_site_unit
+  [ "$status" -eq 0 ]
+  diff <(printf '%s\n' "$output") "$golden/site-nextjs.service"
+  grep -qxF "ExecStart=/bin/sh -c './node_modules/.bin/next start -p \$PORT'" "$golden/site-nextjs.service"
+}
+
+@test "rendering the unit fails, printing nothing, without a port" {
+  need_envsubst
+  proxy_ini_values
+  CONF_PORT=''
+  run --separate-stderr render_site_unit
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "the golden units pass systemd-analyze verify" {
+  command -v systemd-analyze >/dev/null || skip "systemd-analyze isn't installed"
+  local d=$BATS_TEST_TMPDIR/units f
+  mkdir -p "$d"
+  for f in site-node.service site-node-data.service site-nextjs.service; do
+    # verify needs the file named like a unit; site_apply_config names its temp copy the same way.
+    cp "$golden/$f" "$d/shipit-blog.service"
+    run systemd-analyze verify "$d/shipit-blog.service"
+    [ "$status" -eq 0 ] || {
+      echo "$f: $output"
+      return 1
+    }
+  done
+}
+
+@test "the golden site files pass caddy validate" {
   command -v caddy >/dev/null || skip "caddy isn't installed"
   local d=$BATS_TEST_TMPDIR/v f
   mkdir -p "$d/log/blog"
-  for f in site-static.caddy site-static-aliases.caddy; do
+  for f in site-static.caddy site-static-aliases.caddy site-proxy.caddy site-proxy-aliases.caddy; do
     # caddy validate opens the log file, so point it at the temp dir.
     sed "s|/var/log/shipit|$d/log|" "$golden/$f" >"$d/$f"
     run caddy validate --config "$d/$f" --adapter caddyfile
@@ -306,6 +389,93 @@ EOF
   [ "$output" = $'refs/shipit/2222222222222222222222222222222222222222\nrefs/shipit/3333333333333333333333333333333333333333' ]
 }
 
+# ---- Health check and restart --------------------------------------------------------------------
+
+# curl_codes <code>...: a curl stub answering the codes in turn (the last one from then on), logging
+# its arguments to $calls. 000 exits 7, as curl does when nothing answers.
+curl_codes() {
+  calls=${calls:-$BATS_TEST_TMPDIR/calls}
+  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/codes"
+  stub curl 'echo "curl $*" >>"'"$calls"'"; f="'"$BATS_TEST_TMPDIR"'/codes"
+    code=$(head -n 1 "$f")
+    if [ "$(wc -l <"$f")" -gt 1 ]; then tail -n +2 "$f" >"$f.t"; cat "$f.t" >"$f"; fi
+    printf %s "$code"; [ "$code" != 000 ] || exit 7'
+}
+
+# health_values: what site_health_check reads; it polls without waiting, for up to 5 s.
+health_values() {
+  SITE=blog CONF_PORT=3000 INI_DOMAIN=blog.example.com INI_HEALTH=/ INI_HEALTH_STRICT=''
+  HEALTH_TIMEOUT=5 HEALTH_INTERVAL=0
+  calls=$BATS_TEST_TMPDIR/calls
+  : >"$calls"
+}
+
+@test "site_health_check polls until the site answers, with the site's Host header" {
+  health_values
+  curl_codes 000 000 200
+  run site_health_check
+  [ "$status" -eq 0 ]
+  [ "$output" = 'http://127.0.0.1:3000/ answered 200.' ]
+  [ "$(grep -c . "$calls")" -eq 3 ]
+  [ "$(head -n 1 "$calls")" = 'curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/' ]
+}
+
+@test "site_health_check fails when the site answers 500 until the timeout" {
+  health_values
+  HEALTH_TIMEOUT=1 HEALTH_INTERVAL=0.2
+  curl_codes 500
+  run --separate-stderr site_health_check
+  [ "$status" -eq 1 ]
+  [ "$stderr" = 'http://127.0.0.1:3000/ (Host: blog.example.com) answered 500 within 1 s; it needs a status below 500. Check: journalctl -u shipit-blog' ]
+  [ "$(grep -c . "$calls")" -gt 1 ]
+}
+
+@test "site_health_check: a redirect passes by default, but site.health needs exactly 200" {
+  health_values
+  HEALTH_TIMEOUT=0
+  curl_codes 302
+  run site_health_check
+  [ "$status" -eq 0 ]
+  INI_HEALTH=/api/health INI_HEALTH_STRICT=1
+  run --separate-stderr site_health_check
+  [ "$status" -eq 1 ]
+  [ "$stderr" = 'http://127.0.0.1:3000/api/health (Host: blog.example.com) answered 302 within 0 s; it needs 200. Check: journalctl -u shipit-blog' ]
+  curl_codes 000
+  run --separate-stderr site_health_check
+  [[ $stderr == 'http://127.0.0.1:3000/api/health (Host: blog.example.com) gave no answer within 0 s;'* ]]
+}
+
+@test "site_restart_and_check: node restarts; nextjs stops, empties its cache and starts; static does nothing" {
+  health_values
+  curl_codes 200
+  stub systemctl 'echo "systemctl $*" >>"'"$calls"'"'
+  INI_TYPE=node
+  run site_restart_and_check
+  [ "$status" -eq 0 ]
+  diff <(grep -v '^curl' "$calls") - <<<'systemctl restart shipit-blog'
+  : >"$calls"
+  INI_TYPE=nextjs
+  run site_restart_and_check
+  [ "$status" -eq 0 ]
+  diff <(grep -v '^curl' "$calls") - <<<$'systemctl stop shipit-blog\nsystemctl clean --what=cache shipit-blog\nsystemctl start shipit-blog'
+  : >"$calls"
+  INI_TYPE=static
+  run site_restart_and_check
+  [ "$status" -eq 0 ]
+  [ ! -s "$calls" ]
+}
+
+@test "site_restart_and_check fails if the restart fails, without a health check" {
+  health_values
+  curl_codes 200
+  stub systemctl 'echo "systemctl $*" >>"'"$calls"'"; [ "$1" != clean ]'
+  INI_TYPE=nextjs
+  run --separate-stderr site_restart_and_check
+  [ "$status" -eq 1 ]
+  [ "$stderr" = 'Restarting shipit-blog failed. Check: journalctl -u shipit-blog' ]
+  run ! grep -q '^curl\|start' "$calls"
+}
+
 # ---- Whole deploys in a temp root ----------------------------------------------------------------
 
 # host: stubs the host commands (each appends its arguments to $calls), keeps a fake passwd that
@@ -320,9 +490,12 @@ host() {
   : >"$calls"
   : >"$passwd"
   local cmd
-  for cmd in chown setfacl systemctl caddy; do
+  for cmd in chown setfacl systemctl caddy systemd-analyze; do
     stub "$cmd" 'echo "'"$cmd"' $*" >>"'"$calls"'"'
   done
+  # The health check answers 200 (curl_codes changes that), at once: one try, no waiting.
+  curl_codes 200
+  HEALTH_TIMEOUT=0 HEALTH_INTERVAL=0
   stub getent '[ "$1" = passwd ] && grep "^$2:" "'"$passwd"'" || exit 2'
   stub useradd 'echo "useradd $*" >>"'"$calls"'"
     for a; do name=$a; done
@@ -365,6 +538,29 @@ commit() {
     git -c user.name=t -c user.email=t@example.com commit -q -m change
     git rev-parse HEAD
   )
+}
+
+# node_ini <start> [site line]...: a node shipit.ini for blog.example.com.
+node_ini() {
+  local start=$1
+  shift
+  printf '[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = node\n'
+  printf '\t%s\n' "$@"
+  printf '[node]\n\tstart = %s\n' "$start"
+}
+
+# unit, caddy_file: the installed unit and Caddy file, with the temp root's paths put back.
+unit() {
+  local u
+  u=$(<"$SYSTEMD_DIR/shipit-blog.service")
+  u=${u//$SRV_ROOT//srv}
+  printf '%s\n' "${u//$SHIPIT_ETC//etc/shipit}"
+}
+caddy_file() {
+  local c
+  c=$(<"$CADDY_ETC/sites/blog.caddy")
+  c=${c//$SRV_ROOT//srv}
+  printf '%s\n' "${c//$LOG_ROOT//var/log/shipit}"
 }
 
 current() { readlink "$SRV_ROOT/blog/current"; }
@@ -552,14 +748,174 @@ EOF
   run ! grep -q ALIASES "$SHIPIT_ETC/sites/blog.conf"
 }
 
-@test "node and nextjs sites aren't deployed yet; nothing is served" {
+@test "first deploy of a node site: port, unit, daemon-reload, enable, restart, health check, Caddy file" {
   host
-  commit shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = node\n[node]\n\tstart = node server.js' >/dev/null
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  rel=$(releases)
+  [ "${lines[-1]}" = "Deployed blog: now serving $rel." ]
+  [[ $output == *"Gave blog the port 3000."* ]]
+  [ "$(current)" = "releases/$rel" ]
+  diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
+# managed by shipit (shipit deploy writes this file)
+REPO=https://github.com/me/blog
+TYPE=node
+DOMAIN=blog.example.com
+PORT=3000
+EOF
+  diff <(unit) "$golden/site-node.service"
+  diff <(caddy_file) "$golden/site-proxy.caddy"
+  grep -qx "systemd-analyze verify .*/unit/shipit-blog.service" "$calls"
+  # In order: install the unit, reload systemd, enable, reload Caddy, restart, health check.
+  diff <(grep -E '^(systemctl|curl)' "$calls") - <<'EOF'
+systemctl daemon-reload
+systemctl enable --quiet shipit-blog
+systemctl reload caddy
+systemctl restart shipit-blog
+curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/
+EOF
+  # No setfacl for Caddy: it proxies, and never reads the release.
+  run ! grep -q setfacl "$calls"
+  [ -n "$(find "$SYSTEMD_DIR/shipit-blog.service" -perm 644)" ]
+}
+
+@test "a node site's first deploy takes the lowest free port, and later deploys keep it" {
+  host
+  printf 'REPO=https://github.com/me/a\nTYPE=node\nDOMAIN=a.example.com\nPORT=3000\n' >"$SHIPIT_ETC/sites/a.conf"
+  printf 'REPO=https://github.com/me/b\nPORT=3002\n' >"$SHIPIT_ETC/sites/b.conf" # b's first deploy is under way
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  grep -qx PORT=3001 "$SHIPIT_ETC/sites/blog.conf"
+  rm "$SHIPIT_ETC/sites/a.conf"
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  grep -qx PORT=3001 "$SHIPIT_ETC/sites/blog.conf"
+  run ! grep -q 'Gave blog' <<<"$output"
+}
+
+@test "first deploy of a nextjs site: .next/cache links to the cache folder; stop, clean, start" {
+  host
+  stub npm '[ "$1" = run ] || exit 0; mkdir -p .next/cache && echo old >.next/cache/f'
+  commit package.json '{"scripts": {"build": "next build"}}' \
+    shipit.ini $'[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [ "$(readlink "$SRV_ROOT/blog/current/.next/cache")" = /var/cache/shipit-blog ]
+  diff <(unit) "$golden/site-nextjs.service"
+  diff <(grep -E '^systemctl (stop|clean|start|restart) ' "$calls") - <<'EOF'
+systemctl stop shipit-blog
+systemctl clean --what=cache shipit-blog
+systemctl start shipit-blog
+EOF
+}
+
+@test "a node site's data folders: only the unit changes, so systemd reloads and Caddy doesn't" {
+  host
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  commit shipit.ini "$(node_ini 'node server.js')"$'\n[data]\n\tdir = uploads\n\tdir = db' >/dev/null
+  : >"$calls"
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  diff <(unit) "$golden/site-node-data.service"
+  grep -qx 'systemctl daemon-reload' "$calls"
+  grep -qx 'systemctl restart shipit-blog' "$calls"
+  run ! grep -q 'systemctl reload caddy' "$calls"
+  # systemd makes the data folder; shipit never touches it.
+  run ! grep -q 'shipit-blog/\|/var/lib' "$calls"
+
+  # An alias changes only the Caddy file.
+  commit shipit.ini "$(node_ini 'node server.js' 'alias = www.blog.example.com')"$'\n[data]\n\tdir = uploads\n\tdir = db' >/dev/null
+  : >"$calls"
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  grep -qx 'systemctl reload caddy' "$calls"
+  run ! grep -q 'daemon-reload' "$calls"
+  grep -qx 'systemctl restart shipit-blog' "$calls"
+}
+
+@test "a failed health check reverts a later deploy: links, unit and Caddy file back, release deleted" {
+  host
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  old_current=$(current) old_previous=$(previous)
+  old_unit=$(unit) old_caddy=$(caddy_file)
+  commit shipit.ini "$(node_ini 'node other.js' 'alias = www.blog.example.com')" >/dev/null
+  # The new release answers 500; once reverted, the old one answers 200.
+  curl_codes 500 200
+  : >"$calls"
+  run cmd_deploy blog
+  [ "$status" -eq 1 ]
+  [ "${lines[-1]}" = "Deploy failed health check; still serving ${old_current#releases/}." ]
+  [[ $output == *"http://127.0.0.1:3000/ (Host: blog.example.com) answered 500 within 0 s;"* ]]
+  [ "$(current)" = "$old_current" ]
+  [ "$(previous)" = "$old_previous" ]
+  [ "$(releases | sort)" = "$(printf '%s\n' "${old_current#releases/}" "${old_previous#releases/}" | sort)" ]
+  [ "$(unit)" = "$old_unit" ]
+  [ "$(caddy_file)" = "$old_caddy" ]
+  run ! grep -q ALIASES "$SHIPIT_ETC/sites/blog.conf"
+  # The new unit and Caddy file went in, then the old ones again; each start was health-checked.
+  [ "$(grep -c 'systemctl daemon-reload' "$calls")" -eq 2 ]
+  [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 2 ]
+  [ "$(grep -c 'systemctl restart shipit-blog' "$calls")" -eq 2 ]
+  [ "$(grep -c '^curl' "$calls")" -eq 2 ]
+}
+
+@test "a failed first deploy of a node site stops, disables and removes the unit; a rerun can succeed" {
+  host
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  curl_codes 000 200
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
-  [ "${lines[-1]}" = "Deploying node and nextjs sites isn't supported yet." ]
+  [ "${lines[-1]}" = "First deploy of blog failed; nothing is served." ]
+  [[ $output == *"gave no answer"* ]]
+  [ ! -e "$SYSTEMD_DIR/shipit-blog.service" ]
   [ ! -e "$SRV_ROOT/blog/current" ]
-  [ "$(grep -c . "$SHIPIT_ETC/sites/blog.conf")" -eq 2 ] # the marker and REPO
+  [ ! -e "$CADDY_ETC/sites/blog.caddy" ]
+  [ -z "$(releases)" ]
+  grep -qx 'systemctl stop shipit-blog' "$calls"
+  grep -qx 'systemctl disable --quiet shipit-blog' "$calls"
+  [ "$(grep -c 'systemctl daemon-reload' "$calls")" -eq 2 ]
+  [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 2 ]
+  # The users and the conf (REPO and the port) are kept.
+  diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
+# managed by shipit (shipit deploy writes this file)
+REPO=https://github.com/me/blog
+PORT=3000
+EOF
+  [ "$(wc -l <"$passwd" | tr -d ' ')" -eq 2 ]
+
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  grep -qx PORT=3000 "$SHIPIT_ETC/sites/blog.conf"
+  diff <(unit) "$golden/site-node.service"
+}
+
+@test "a unit file shipit didn't write is refused, and the deploy reverts" {
+  host
+  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  echo '[Service]' >"$SYSTEMD_DIR/shipit-blog.service"
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 1 ]
+  [[ $output == *"$SYSTEMD_DIR/shipit-blog.service wasn't written by shipit, so it wasn't replaced."* ]]
+  [ "${lines[-1]}" = "First deploy of blog failed; nothing is served." ]
+  [ "$(cat "$SYSTEMD_DIR/shipit-blog.service")" = '[Service]' ]
+  run ! grep -q '^systemctl' "$calls"
 }
 
 @test "a user named like the site that shipit didn't make is refused before anything changes" {

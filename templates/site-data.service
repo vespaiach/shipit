@@ -1,0 +1,4 @@
+# The site's data folder, /var/lib/shipit-${SITE}, and one subfolder per data.dir, made by systemd and
+# writable only by ${SITE}. $STATE_DIRECTORY lists them, joined by ':'.
+StateDirectory=${STATE_DIRS}
+StateDirectoryMode=0700

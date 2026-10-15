@@ -1,8 +1,8 @@
 # shipit
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
-> milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser), M2 (`shipit setup`) and M3
-> (`shipit deploy` for static sites) are done. Node and Next.js deploys (M4), `rollback` (M5) and
+> milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser), M2 (`shipit setup`), M3
+> (`shipit deploy` for static sites) and M4 (Node and Next.js deploys) are done. `rollback` (M5) and
 > `setup --ci-key` (M6) aren't implemented yet.
 
 ## 1. What it is
@@ -40,7 +40,7 @@ logins, but only if root has a key in `authorized_keys` and you logged in with i
 the VPS host keys: replace `<host>` and save them as the GitHub secret `VPS_KNOWN_HOSTS`. Setting up
 the `ci` user's keys (`shipit setup --ci-key <name> <key file>`) comes with CI support.
 
-Each repo has a `shipit.ini` at its root. A static site (for now the only type `deploy` takes):
+Each repo has a `shipit.ini` at its root. A static site:
 
 ```ini
 [site]
@@ -56,6 +56,25 @@ root = dist                ; the folder Caddy serves, after the build
 [node]                     ; optional: the defaults are picked from the repo
 install = npm ci           ; default by lockfile: npm ci, pnpm install --frozen-lockfile, yarn install --immutable
 build = npm run build      ; default: npm run build if package.json has a build script
+```
+
+A Node site (`start` is required and must listen on `$PORT`) or a Next.js site (every command has a
+default; `start` defaults to `./node_modules/.bin/next start -p $PORT`):
+
+```ini
+[site]
+name = api
+domain = api.example.com
+type = node                ; or nextjs
+health = /healthz          ; optional: checked after each restart; set, it must answer exactly 200
+env = DATABASE_URL         ; optional, repeatable
+
+[node]
+start = node server.js     ; nextjs: optional
+
+[data]                     ; optional: persistent folders, /var/lib/shipit-api/uploads and .../db
+dir = uploads
+dir = db
 ```
 
 Deploying a site:
@@ -82,6 +101,27 @@ ssh root@vps shipit deploy docs v1.2.0
   itself, switches `current` to it (the old one becomes `previous`), writes the site's Caddy file
   and reloads Caddy if it changed, and deletes older releases. A failed build changes nothing; a
   Caddy file that doesn't validate switches back.
+- **Node and Next.js sites.** The first deploy gives the site a port from 3000–3999 (kept in
+  `/etc/shipit/sites/<name>.conf`). Each deploy writes the unit
+  `/etc/systemd/system/shipit-<name>.service` (run as the user `<name>`, hardened, enabled at boot)
+  and a Caddy file proxying to the port, restarts the site, and polls
+  `http://127.0.0.1:<port><health>` with the site's `Host` header for up to 60 s (any status below
+  500, or exactly 200 when `site.health` is set). If the site doesn't come up, the deploy switches
+  back to the previous release, restarts it and fails: "Deploy failed health check; still serving
+  <release>." A failed first deploy removes the unit, `current`, the Caddy file and the release, and
+  keeps the users and the port, so you can fix it and run the same command again. Next.js's runtime
+  cache lives in `/var/cache/shipit-<name>` (`.next/cache` links to it) and is emptied on every
+  deploy.
+- **The env file at runtime.** A Node/Next.js process gets the env file through systemd
+  (`EnvironmentFile=`, read as root), plus `NODE_ENV=production` and `PORT`. A site without an env
+  file starts without one. After editing the file, redeploy (or `systemctl restart shipit-<name>`).
+- **Data folders.** With `[data]`, systemd creates `/var/lib/shipit-<name>/` and one subfolder per
+  `dir` (owned by `<name>`, mode 700), the only place the process can write. `$STATE_DIRECTORY`
+  lists them joined by `:` (`/var/lib/shipit-api:/var/lib/shipit-api/uploads:...`), so use the
+  fixed path `/var/lib/shipit-<name>/<dir>` or the first entry. Deploys never touch it, and it isn't
+  backed up.
+- **Logs.** `journalctl -u shipit-<name>` (app output), `tail -f /var/log/shipit/<name>/access.log |
+  jq` (requests), `journalctl -u caddy` (TLS and proxy errors).
 
 Secrets live only on the server. The GitHub Actions workflow and every `shipit.ini` key are in
 [docs/plan.md](docs/plan.md) (sections 3 and 5.4).
@@ -105,12 +145,14 @@ Secrets live only on the server. The GitHub Actions workflow and every `shipit.i
 /etc/shipit/sites/<name>.conf       repo, type, domains, port
 /etc/shipit/sites/<name>.env        secrets (root only)
 /etc/caddy/sites/<name>.caddy       the site's Caddy config
+/etc/systemd/system/shipit-<name>.service   the site's unit (Node/Next.js)
 /srv/<name>/
   repo.git/                         bare clone
   releases/<time>-<sha>/            at most two
   current  -> releases/...
   previous -> releases/...
 /var/lib/shipit-<name>/             persistent data (opt-in, survives deploys)
+/var/cache/shipit-<name>/           Next.js runtime cache, emptied on every deploy
 /var/log/shipit/<name>/access.log   Caddy access log
 ```
 

@@ -1,0 +1,4 @@
+# Next.js's runtime cache, /var/cache/shipit-${SITE}: the release's .next/cache links to it, and it's
+# emptied on every switch.
+CacheDirectory=shipit-${SITE}
+CacheDirectoryMode=0700
