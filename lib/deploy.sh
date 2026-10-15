@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # shipit deploy: builds a site from GitHub and switches to it (plan §5.2): resolve the site (A), build
 # a release (B), switch to it (C), prune (D). cmd_deploy calls the deploy_* steps in that order.
-# site_apply_config (render the config from `current`, plan §5.5) is shared with revert and rollback.
+# site_apply_config (render the config from `current`, plan §5.5) and site_restart_and_check (restart
+# and health check, C.3) are shared with revert and rollback.
 # Sourcing this file only defines constants and functions. Needs lib/common.sh.
 
 # shellcheck source=lib/config.sh
@@ -9,6 +10,11 @@
 
 # The PATH every repo command runs with (plus HOME=/srv/<name>/home and LANG, nothing else).
 BUILD_PATH=/usr/local/bin:/usr/bin:/bin
+# The health check after a node/nextjs restart (plan §5.2 C.3): polled every HEALTH_INTERVAL seconds
+# for up to HEALTH_TIMEOUT seconds; each request may take up to HEALTH_MAX_TIME seconds.
+HEALTH_TIMEOUT=60
+HEALTH_INTERVAL=1
+HEALTH_MAX_TIME=5
 # The two site users' shell, and how deploy recognises users it made: their GECOS (`comment`) field.
 NOLOGIN=/usr/sbin/nologin
 DEPLOY_USAGE='Usage: shipit deploy <name> [ref], or shipit deploy <repo-url> <name> [ref] for a first deploy.'
@@ -274,16 +280,22 @@ render_site_caddy() {
   done
 }
 
-# site_caddy_install <file>: validates the site's Caddy file as caddy (validating opens the log file,
-# plan §5.1 step 4), installs it if it changed, and reloads Caddy (never restarts it) if so.
-site_caddy_install() {
-  local dest=$CADDY_ETC/sites/$SITE.caddy out
+# site_caddy_check <file>: validates the site's Caddy file as caddy (validating opens the log file,
+# plan §5.1 step 4).
+site_caddy_check() {
+  local out
   chmod 644 "$1"
   if ! out=$(runuser -u caddy -- caddy validate --config "$1" --adapter caddyfile 2>&1); then
     err "$out"
     err "The Caddy file for $SITE didn't pass caddy validate, so it wasn't installed."
     return 1
   fi
+}
+
+# site_caddy_install <file>: installs the checked Caddy file if it changed, and reloads Caddy (never
+# restarts it) if so.
+site_caddy_install() {
+  local dest=$CADDY_ETC/sites/$SITE.caddy
   if install_if_changed "$1" "$dest" 644; then
     if ! systemctl reload caddy; then
       err "Reloading Caddy failed. Check: systemctl status caddy"
@@ -293,11 +305,119 @@ site_caddy_install() {
   fi
 }
 
+# ---- The unit (node, nextjs) ---------------------------------------------------------------------
+
+# render_site_unit: prints a node/nextjs site's unit: site.service (with PORT from CONF_PORT and
+# START from node.start), then site-data.service when shipit.ini has data.dir entries (StateDirectory=
+# shipit-<name> and shipit-<name>/<dir> for each), then site-nextjs.service for nextjs. The parts
+# after the first only add lines to its [Service] section, which comes last. Values come from INI_*.
+render_site_unit() {
+  # shellcheck disable=SC2034 # read by render
+  local PORT=$CONF_PORT START=$INI_START STATE_DIRS dir
+  render "$SHIPIT_TEMPLATES/site.service" SITE SRV_ROOT SHIPIT_ETC PORT START || return 1
+  if [ "${#INI_DIRS[@]}" -gt 0 ]; then
+    STATE_DIRS=shipit-$SITE
+    for dir in "${INI_DIRS[@]}"; do STATE_DIRS+=" shipit-$SITE/$dir"; done
+    render "$SHIPIT_TEMPLATES/site-data.service" SITE STATE_DIRS || return 1
+  fi
+  if [ "$INI_TYPE" = nextjs ]; then
+    render "$SHIPIT_TEMPLATES/site-nextjs.service" SITE || return 1
+  fi
+}
+
+# site_unit_check <file>: the unit file (named shipit-<name>.service, as systemd-analyze needs) passes
+# systemd-analyze verify, and the installed unit, if any, is shipit's.
+site_unit_check() {
+  local dest=$SYSTEMD_DIR/shipit-$SITE.service out
+  if [ -e "$dest" ] && ! is_shipit_file "$dest"; then
+    err "$dest wasn't written by shipit, so it wasn't replaced. Move it away, then run the deploy again."
+    return 1
+  fi
+  if ! out=$(systemd-analyze verify "$1" 2>&1); then
+    err "$out"
+    err "The unit for $SITE didn't pass systemd-analyze verify, so it wasn't installed."
+    return 1
+  fi
+}
+
+# site_unit_install <file>: installs the checked unit if it changed, then daemon-reload, and enables it
+# (idempotent), so the site comes back after a reboot.
+site_unit_install() {
+  local dest=$SYSTEMD_DIR/shipit-$SITE.service
+  if install_if_changed "$1" "$dest" 644; then
+    if ! systemctl daemon-reload; then
+      err "systemctl daemon-reload failed. Check: journalctl -u init.scope"
+      return 1
+    fi
+    log "Wrote $dest and reloaded systemd."
+  fi
+  if ! systemctl enable --quiet "shipit-$SITE"; then
+    err "Enabling shipit-$SITE failed. Check: systemctl status shipit-$SITE"
+    return 1
+  fi
+}
+
+# site_unit_remove: stops, disables and deletes the site's unit (a failed first deploy).
+site_unit_remove() {
+  local dest=$SYSTEMD_DIR/shipit-$SITE.service
+  [ -e "$dest" ] && is_shipit_file "$dest" || return 0
+  systemctl stop "shipit-$SITE" || err "Stopping shipit-$SITE failed."
+  systemctl disable --quiet "shipit-$SITE" || err "Disabling shipit-$SITE failed."
+  rm -f -- "$dest"
+  systemctl daemon-reload || err "systemctl daemon-reload failed."
+}
+
+# site_health_check: polls http://127.0.0.1:<PORT><site.health> with Host: <site.domain> until
+# health_ok accepts the status (exactly 200 when site.health is set) or HEALTH_TIMEOUT runs out.
+# Values come from INI_* and CONF_PORT.
+site_health_check() {
+  local url=http://127.0.0.1:$CONF_PORT$INI_HEALTH code need='a status below 500'
+  local end=$((SECONDS + HEALTH_TIMEOUT))
+  [ -z "$INI_HEALTH_STRICT" ] || need=200
+  while :; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$HEALTH_MAX_TIME" \
+      -H "Host: $INI_DOMAIN" "$url" </dev/null) || true
+    if health_ok "$code" "$INI_HEALTH_STRICT"; then
+      log "$url answered $code."
+      return 0
+    fi
+    [ "$SECONDS" -lt "$end" ] || break
+    sleep "$HEALTH_INTERVAL"
+  done
+  [[ $code =~ ^[1-5][0-9][0-9]$ ]] && code="answered $code" || code='gave no answer'
+  err "$url (Host: $INI_DOMAIN) $code within $HEALTH_TIMEOUT s; it needs $need. Check: journalctl -u shipit-$SITE"
+  return 1
+}
+
+# site_restart_and_check: after site_apply_config, restarts a node/nextjs site and health-checks it
+# (plan §5.2 C.3). nextjs: stop, empty the cache, start, so a release never sees another's cache.
+# Static: nothing to do. Fails if the restart or the health check does. Shared with revert and
+# rollback.
+site_restart_and_check() {
+  local unit=shipit-$SITE
+  case "$INI_TYPE" in
+    static) return 0 ;;
+    node) systemctl restart "$unit" || {
+      err "Restarting $unit failed. Check: journalctl -u $unit"
+      return 1
+    } ;;
+    nextjs)
+      if ! systemctl stop "$unit" || ! systemctl clean --what=cache "$unit" || ! systemctl start "$unit"; then
+        err "Restarting $unit failed. Check: journalctl -u $unit"
+        return 1
+      fi
+      ;;
+  esac
+  log "Restarted $unit."
+  site_health_check
+}
+
 # site_apply_config: renders the site's config from the shipit.ini of the release `current` points at,
-# checked again as in plan §3 (with the clash check), installs it, and writes TYPE, DOMAIN and
-# ALIASES to <name>.conf (plan §5.5). Used after every switch, revert and rollback.
+# checked again as in plan §3 (with the clash check), validates all of it, installs it, and writes
+# TYPE, DOMAIN and ALIASES to <name>.conf (plan §5.5). node/nextjs: the unit too, and a proxy to PORT.
+# Used after every switch, revert and rollback; site_restart_and_check follows it.
 site_apply_config() {
-  local target sha
+  local target sha caddy=$DEPLOY_TMP/site.caddy unit=$DEPLOY_TMP/unit/shipit-$SITE.service PORT
   target=$(link_target "$SITE_DIR/current") || return 1
   if [ -z "$target" ]; then
     err "$SITE_DIR/current is missing."
@@ -307,14 +427,21 @@ site_apply_config() {
   site_ini "$sha" "$DEPLOY_TMP/current.ini" || return 1
   ini_check_name "$SITE" no || return 1
   ini_check_clash "$SITE" || return 1
-  case "$INI_TYPE" in
-    static) render_site_caddy site-static.caddy ROOT >"$DEPLOY_TMP/site.caddy" || return 1 ;;
-    *)
-      err "Deploying node and nextjs sites isn't supported yet."
-      return 1
-      ;;
-  esac
-  site_caddy_install "$DEPLOY_TMP/site.caddy" || return 1
+  if [ "$INI_TYPE" = static ]; then
+    render_site_caddy site-static.caddy ROOT >"$caddy" || return 1
+  else
+    # shellcheck disable=SC2034 # read by render
+    PORT=$CONF_PORT
+    mkdir -p -- "$DEPLOY_TMP/unit"
+    render_site_caddy site-proxy.caddy PORT >"$caddy" || return 1
+    render_site_unit >"$unit" || return 1
+    site_unit_check "$unit" || return 1
+  fi
+  site_caddy_check "$caddy" || return 1
+  if [ "$INI_TYPE" != static ]; then
+    site_unit_install "$unit" || return 1
+  fi
+  site_caddy_install "$caddy" || return 1
   # shellcheck disable=SC2034 # written by site_conf_write
   CONF_TYPE=$INI_TYPE CONF_DOMAIN=$INI_DOMAIN CONF_ALIASES=("${INI_ALIASES[@]}")
   site_conf_write "$SITE"
@@ -431,13 +558,6 @@ deploy_access() {
   die "Can't fetch $CONF_REPO. If it's a private repo, add this key as a read-only deploy key at https://github.com/$(repo_slug "$CONF_REPO")/settings/keys/new, then run the same command again."
 }
 
-# deploy_supported_type: M3 deploys static sites only. M4 replaces this with the node/nextjs steps.
-deploy_supported_type() {
-  case "$INI_TYPE" in
-    node | nextjs) die "Deploying node and nextjs sites isn't supported yet." ;;
-  esac
-}
-
 # A.3: fetches, resolves the ref to a full SHA, and checks shipit.ini at that commit.
 deploy_fetch() {
   local rev=$REF branch first=no env=$SHIPIT_ETC/sites/$SITE.env missing
@@ -463,7 +583,6 @@ deploy_fetch() {
   site_ini "$SHA" "$DEPLOY_TMP/shipit.ini" || die "Fix shipit.ini, then run the deploy again."
   ini_check_name "$SITE" "$first" || exit 1
   [ "$first" = yes ] || ini_check_type "$CONF_TYPE" || exit 1
-  deploy_supported_type
   ini_check_clash "$SITE" || exit 1
   if [ -e "$env" ]; then
     # shellcheck disable=SC2094 # $0 is only the file's name, for messages
@@ -518,11 +637,31 @@ release_commands() {
   fi
 }
 
+# deploy_port: a node/nextjs site's first deploy gets the lowest free port (decision 25), written to
+# <name>.conf next to REPO at once. It runs under build.lock, which every deploy takes, so two first
+# deploys of different sites can't pick the same port. Later deploys (and reruns) keep CONF_PORT.
+deploy_port() {
+  [ "$INI_TYPE" != static ] && [ -z "$CONF_PORT" ] || return 0
+  CONF_PORT=$(site_next_port) || exit 1
+  site_conf_write "$SITE" || die "Couldn't write $SHIPIT_ETC/sites/$SITE.conf."
+  log "Gave $SITE the port $CONF_PORT."
+}
+
+# B.3, nextjs: the release's .next/cache (the build cache) becomes a link to the site's cache folder,
+# which systemd makes (CacheDirectory=), so `next start` can write its image and ISR cache there.
+release_nextjs_cache() {
+  # shellcheck disable=SC2016 # expanded by the build user's sh
+  as_build sh -c 'cd "$1" && rm -rf .next/cache && mkdir -p .next && ln -s "$2" .next/cache' \
+    nextcache "$RELEASE_DIR" "$CACHE_ROOT/shipit-$SITE" </dev/null \
+    || die "Linking .next/cache to $CACHE_ROOT/shipit-$SITE failed."
+}
+
 # B: builds the release under build.lock, then takes it back and, for a static site, checks <root> and
 # gives Caddy read access to it.
 deploy_build() {
   lock_wait "$SHIPIT_VAR/build.lock" "Another site is building; waiting." \
     || die "Couldn't take $SHIPIT_VAR/build.lock."
+  deploy_port
   release_create
   log "Building $SHA in $RELEASE_DIR."
   # shellcheck disable=SC2016 # expanded by the build user's bash
@@ -530,6 +669,7 @@ deploy_build() {
     extract "$SITE_DIR/repo.git" "$SHA" "$RELEASE_DIR" </dev/null || die "Extracting $SHA failed."
   git_build update-ref "refs/shipit/$SHA" "$SHA" </dev/null || die "Pinning $SHA in repo.git failed."
   release_commands
+  [ "$INI_TYPE" != nextjs ] || release_nextjs_cache
   # A process the build left running could still write to the release through files it holds open.
   pkill -KILL -u "$BUILD_USER" 2>/dev/null || true
   chown -R -- "root:$SITE" "$RELEASE_DIR" || die "Taking back $RELEASE_DIR (chown) failed."
@@ -558,17 +698,22 @@ deploy_switch() {
   fi
 }
 
-# C.4 revert <reason>: puts current and previous back, re-renders from the restored release, deletes
-# the failed one and exits non-zero. A first deploy leaves nothing served.
+# C.4 revert <reason>: puts current and previous back, re-renders from the restored release, restarts
+# it, deletes the failed one and exits non-zero. A first deploy leaves nothing served: the unit is
+# stopped, disabled and deleted, and <name>.conf goes back to REPO (and PORT), so a rerun starts over.
 deploy_revert() {
   local caddy=$CADDY_ETC/sites/$SITE.caddy
   if [ -z "$OLD_CURRENT" ]; then
+    site_unit_remove
     rm -f -- "$SITE_DIR/current"
     if [ -e "$caddy" ] && is_shipit_file "$caddy"; then
       rm -f -- "$caddy"
       systemctl reload caddy || err "Reloading Caddy failed. Check: systemctl status caddy"
     fi
     rm -rf -- "$RELEASE_DIR"
+    # shellcheck disable=SC2034 # written by site_conf_write
+    CONF_TYPE='' CONF_DOMAIN='' CONF_ALIASES=()
+    site_conf_write "$SITE" || err "Couldn't write $SHIPIT_ETC/sites/$SITE.conf."
     die "First deploy of $SITE failed; nothing is served."
   fi
   atomic_link "$OLD_CURRENT" "$SITE_DIR/current" || die "Switching $SITE_DIR/current back failed."
@@ -577,14 +722,20 @@ deploy_revert() {
   else
     rm -f -- "$SITE_DIR/previous"
   fi
-  site_apply_config || err "Installing the config of ${OLD_CURRENT#releases/} again failed too; fix the error above."
+  if ! site_apply_config; then
+    err "Installing the config of ${OLD_CURRENT#releases/} again failed too; fix the error above."
+  elif ! site_restart_and_check; then
+    err "${OLD_CURRENT#releases/} didn't come back up either; fix the error above."
+  fi
   rm -rf -- "$RELEASE_DIR"
   die "$1; still serving ${OLD_CURRENT#releases/}."
 }
 
-# C.2: the config from the new current; revert if it can't be installed.
+# C.2, C.3: the config from the new current, then (node/nextjs) restart and health check; revert if
+# either fails.
 deploy_config() {
   site_apply_config || deploy_revert "Deploy failed: the new release's config couldn't be installed"
+  site_restart_and_check || deploy_revert "Deploy failed health check"
 }
 
 # ---- D. Prune ------------------------------------------------------------------------------------

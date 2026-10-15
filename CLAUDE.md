@@ -33,16 +33,23 @@ in step with the code.
   sh scripts `ENV_EXEC` (exports the env file read on stdin, then runs a command) and `RUN_IN`;
   `as_build` (every repo command, as `<name>-build`, `env -i`, umask 027, locks dropped),
   `git_remote`/`git_build`, `site_ini`, `link_target`; Caddy: `render_site_caddy` (log snippet +
-  type block + alias blocks), `site_caddy_install`, and `site_apply_config` (plan §5.5: render from
-  `current`, install, write TYPE/DOMAIN/ALIASES; shared with revert and rollback); steps
-  `deploy_resolve` (A.1), `deploy_access` (A.2), `deploy_fetch` (A.3), `deploy_build` (B),
-  `deploy_switch` (C.1), `deploy_config` (C.2, with `deploy_revert`, C.4), `deploy_prune` (D), called
-  in order by `cmd_deploy`. `deploy_supported_type` (refuses node/nextjs) and the `*)` branch of
-  `site_apply_config` are where M4 adds node and Next.js.
+  type block + alias blocks), `site_caddy_check`, `site_caddy_install`; the unit (node/nextjs):
+  `render_site_unit` (site.service + optional data/nextjs parts), `site_unit_check`
+  (`systemd-analyze verify`), `site_unit_install` (daemon-reload if changed, enable),
+  `site_unit_remove`; `site_apply_config` (plan §5.5: render from `current`, check, install, write
+  TYPE/DOMAIN/ALIASES) and `site_restart_and_check` (C.3: restart, or stop/clean/start for nextjs,
+  then `site_health_check`), both shared with revert and rollback (M5 calls them in that order);
+  steps `deploy_resolve` (A.1), `deploy_access` (A.2), `deploy_fetch` (A.3), `deploy_build` (B, with
+  `deploy_port` for a first node/nextjs deploy and `release_nextjs_cache`, B.3), `deploy_switch`
+  (C.1), `deploy_config` (C.2–C.3, with `deploy_revert`, C.4), `deploy_prune` (D), called in order by
+  `cmd_deploy`. `HEALTH_TIMEOUT`, `HEALTH_INTERVAL` and `HEALTH_MAX_TIME` (plain constants there) time
+  the health check.
 - `templates/` — what `render` fills in: `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
   `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`, and a site's Caddy
-  file in parts: `site-log.caddy` (marker + log snippet), `site-static.caddy`, `site-alias.caddy` (one
-  per alias). `github_known_hosts` is copied data (GitHub's SSH host keys, used by git's ssh as is).
+  file in parts: `site-log.caddy` (marker + log snippet), `site-static.caddy` or `site-proxy.caddy`,
+  `site-alias.caddy` (one per alias); a node/nextjs site's unit in parts: `site.service` (marker,
+  `[Unit]`, `[Install]`, `[Service]` last), `site-data.service` (with `data.dir`),
+  `site-nextjs.service`. `github_known_hosts` is copied data (GitHub's SSH host keys, used by git's ssh as is).
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`), `test/golden/` (expected
   rendered output), `test/fixtures/`.
@@ -56,14 +63,15 @@ in step with the code.
 - **Test seams are plain constants** in `common.sh`: `SHIPIT_ETC` (`/etc/shipit`), `SHIPIT_VAR`
   (`/var/lib/shipit`), `SRV_ROOT` (`/srv`), `CADDY_ETC` (`/etc/caddy`), `LOG_ROOT`
   (`/var/log/shipit`), `OS_RELEASE` (`/etc/os-release`), `APT_ETC` (`/etc/apt`), `SSH_ETC`
-  (`/etc/ssh`), `FAIL2BAN_ETC` (`/etc/fail2ban`), `ROOT_HOME` (`/root`) and `SHIPIT_TEMPLATES`
-  (`templates/` next to `lib/`). Never read them from the environment or add flags for them; tests
-  reassign them after sourcing. Lock helpers take the lock path. Tests stub commands such as `id`,
-  `mv`, `systemctl`, `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`,
-  `useradd`, `getent`, `chown` and `setfacl` through `PATH`, so call commands by name (no absolute
-  paths, no `$EUID`). Deploy tests run git for real: the stubbed `runuser` runs commands as the test
-  user, `BUILD_PATH` (lib/deploy.sh) gets the stubs prepended, and `url.<local repo>.insteadOf` in
-  the build user's `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
+  (`/etc/ssh`), `FAIL2BAN_ETC` (`/etc/fail2ban`), `ROOT_HOME` (`/root`), `SYSTEMD_DIR`
+  (`/etc/systemd/system`), `CACHE_ROOT` (`/var/cache`) and `SHIPIT_TEMPLATES` (`templates/` next to
+  `lib/`). Never read them from the environment or add flags for them; tests reassign them after
+  sourcing. Lock helpers take the lock path. Tests stub commands such as `id`, `mv`, `systemctl`,
+  `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`, `useradd`, `getent`,
+  `chown`, `setfacl`, `systemd-analyze` and `curl` through `PATH`, so call commands by name (no
+  absolute paths, no `$EUID`). Deploy tests run git for real: the stubbed `runuser` runs commands as
+  the test user, `BUILD_PATH` (lib/deploy.sh) gets the stubs prepended, and `url.<local
+  repo>.insteadOf` in the build user's `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value read from a config or `shipit.ini`, or typed by a person, before
   using it.
@@ -75,7 +83,8 @@ in step with the code.
 - **Templates go through `render <template> <VAR>...`** (envsubst with an explicit list). It fails,
   printing nothing, on an unset or empty variable. Never `sed` values into files.
 - **Validate on a temp copy, then install**: render to a temp file, check it (`visudo -cf`,
-  `caddy validate`, `systemd-analyze verify`, `sshd -t`), then `install -m`.
+  `caddy validate`, `systemd-analyze verify` on `<tmp>/shipit-<name>.service`, `sshd -t`), then
+  `install -m`.
 - **Atomic switches** go through `atomic_link <target> <link>` (`ln -s target link.new && mv -T
   link.new link`).
 - **Caddy is reloaded, never restarted.** Only overwrite files marked `# managed by shipit` (`//` in
@@ -99,8 +108,8 @@ in step with the code.
 ## Making a change
 
 Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`), M2
-(`shipit setup`, without `--ci-key`, which comes with M6) and M3 (`shipit deploy` for static sites)
-are implemented; M4–M7 are to do.
+(`shipit setup`, without `--ci-key`, which comes with M6), M3 (`shipit deploy` for static sites) and
+M4 (node and Next.js deploys, health check, auto-revert) are implemented; M5–M7 are to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.

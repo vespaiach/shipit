@@ -1,0 +1,13 @@
+
+# ${DOMAIN} is proxied to the site's process, listening on 127.0.0.1:${PORT}.
+${DOMAIN} {
+	import shipit-${SITE}-log
+	reverse_proxy 127.0.0.1:${PORT}
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options SAMEORIGIN
+		-Server
+	}
+}
