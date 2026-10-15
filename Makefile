@@ -11,4 +11,4 @@ lint:
 	shfmt -i 2 -ci -bn -d $(SHELL_FILES)
 
 test:
-	bats test/unit
+	bats --jobs 4 test/unit

@@ -482,7 +482,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M2 | `setup` (incl. SSH hardening, firewall) | bats (golden files for every rendered file) |
 | M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
-| M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
+| M5 | `rollback` (done) | bats (static and node rollbacks re-render from the previous release's `shipit.ini`, node's including its health path; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
 | M6 | `remote` + CI user + GitHub Actions example (done; removed later, decision 68) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten (done) | review |
 
