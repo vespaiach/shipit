@@ -1,0 +1,1 @@
+restrict,command="sudo /usr/local/bin/shipit remote blog" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleCiKeyForShipitTests000000000000 shipit:blog

@@ -1,0 +1,21 @@
+name: rollback
+on: workflow_dispatch
+concurrency:
+  group: deploy-blog
+  cancel-in-progress: false
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Roll back on VPS
+        env:
+          SHIPIT_KEY: ${{ secrets.SHIPIT_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          install -d -m 700 ~/.ssh
+          install -m 600 /dev/stdin ~/.ssh/id_ed25519 <<< "$SHIPIT_KEY"
+          install -m 644 /dev/stdin ~/.ssh/known_hosts <<< "$VPS_KNOWN_HOSTS"
+          ssh -p "${VPS_PORT:-22}" -o StrictHostKeyChecking=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=6 "ci@$VPS_HOST" rollback blog

@@ -68,11 +68,11 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
   [ "$output" = "Run this as root, or with sudo: sudo shipit deploy https://github.com/me/blog blog main" ]
 }
 
-@test "commands not built yet say so and fail" {
+@test "remote is dispatched with its arguments" {
   as_root
-  run "$shipit" remote blog
+  run env -u SSH_ORIGINAL_COMMAND "$shipit" remote blog
   [ "$status" -eq 1 ]
-  [ "$output" = "shipit remote isn't implemented yet." ]
+  [ "$output" = "No command given. This key can only run: deploy blog [<commit sha or branch>], or rollback blog." ]
 }
 
 @test "works through a symlink, as installed" {

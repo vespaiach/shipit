@@ -36,6 +36,12 @@ FAIL2BAN_ETC=/etc/fail2ban
 # Root's home, for .ssh/authorized_keys.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 ROOT_HOME=/root
+# The ci user's home (root-owned): .ssh/authorized_keys holds one forced-command line per site key.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+CI_HOME=/home/ci
+# Where setup writes shipit-ci, the ci user's one sudoers rule.
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+SUDOERS_DIR=/etc/sudoers.d
 
 # Where render's templates live: templates/ next to lib/, in a checkout and when installed.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
@@ -82,6 +88,20 @@ health_ok() {
   else
     [ "$1" -lt 500 ]
   fi
+}
+
+# ---- Users ---------------------------------------------------------------------------------------
+
+# user_state <user> <comment>: prints missing, shipit (its GECOS field is <comment>, so shipit made it)
+# or other.
+user_state() {
+  local entry gecos
+  if ! entry=$(getent passwd "$1"); then
+    echo missing
+    return 0
+  fi
+  IFS=: read -r _ _ _ _ gecos _ <<<"$entry"
+  if [ "$gecos" = "$2" ]; then echo shipit; else echo other; fi
 }
 
 # ---- Files ---------------------------------------------------------------------------------------

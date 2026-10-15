@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 shipit is a bash tool that sets up a Debian or Ubuntu VPS (`shipit setup`), deploys static, Node and
-Next.js sites from GitHub onto it (`shipit deploy`) and goes back one release (`shipit rollback`).
+Next.js sites from GitHub onto it (`shipit deploy`) and goes back one release (`shipit rollback`),
+by hand or from GitHub Actions (the `ci` user, `shipit remote`).
 **docs/plan.md is the spec**: read it before changing anything, and keep it, README.md and this file
 in step with the code.
 
@@ -24,9 +25,13 @@ in step with the code.
   `cmd_<command>`. Logic lives in small stdin/argument-driven helpers the tests call; the host-touching
   steps stay thin. `lib/setup.sh`: helpers `version_ge`, `os_supported`, `node_lts_major`,
   `host_conf_read`, `sshd_ports`, `has_authorized_key`, `session_used_key`, `ssh_key_login_ok`,
-  `known_hosts_lines`, `may_replace`; steps `setup_packages` (`setup_host_conf`, `setup_apt_repos`,
-  `setup_corepack`), `setup_dirs`, `setup_caddy`, `setup_firewall`, `setup_fail2ban`,
-  `setup_auto_upgrades`, `setup_ssh`, `print_known_hosts`, called in order by `cmd_setup`.
+  `known_hosts_lines`, `may_replace`, `ci_key_parse` (one `--ci-key` file, checked with
+  `ssh-keygen -l`), `setup_args` (every `--ci-key`, before anything changes; sets `CI_NAMES` and
+  `CI_KEYS`), `ci_keys_merge` (the site's `authorized_keys` line replaced, others kept); steps
+  `setup_packages` (`setup_host_conf`, `setup_apt_repos`, `setup_corepack`), `setup_dirs`,
+  `setup_ci_user`, `setup_caddy`, `setup_firewall`, `setup_fail2ban`, `setup_auto_upgrades`,
+  `setup_sudoers` (`visudo -cqf`), `setup_ci_keys`, `setup_ssh`, `print_known_hosts`, called in order
+  by `cmd_setup`. It sources `lib/config.sh` (`check_site_name`, `in_list`).
   `lib/deploy.sh` (sources `lib/config.sh`): helpers `deploy_args`, `same_repo`, `default_branch`,
   `install_default`, `build_default`, `missing_env_keys`, `release_name`/`release_sha`,
   `path_resolve`, `static_root_check`, `prune_releases`, `prune_refs`, `site_user_state`; the
@@ -47,13 +52,20 @@ in step with the code.
   `lib/rollback.sh` sources `lib/deploy.sh` and reuses its state globals and helpers (`site_lock`,
   `link_target`, `atomic_link`, `site_apply_config`, `site_restart_and_check`, `deploy_exit`); its own
   are `rollback_args`, `rollback_links` (previous first, then current, plan decision 60) and
-  `rollback_revert`.
+  `rollback_revert`. `lib/remote.sh` sources `lib/rollback.sh`: `remote_parse` checks
+  `$SSH_ORIGINAL_COMMAND` against the key's site (sets `REMOTE_CMD`, `REMOTE_ARGS`), and `cmd_remote`
+  then calls `cmd_deploy` or `cmd_rollback` in the same process (plan decisions 64, 65).
+  `user_state` (GECOS check of a user shipit made) is in `lib/common.sh`, shared by deploy and setup.
 - `templates/` — what `render` fills in: `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
   `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`, and a site's Caddy
   file in parts: `site-log.caddy` (marker + log snippet), `site-static.caddy` or `site-proxy.caddy`,
   `site-alias.caddy` (one per alias); a node/nextjs site's unit in parts: `site.service` (marker,
   `[Unit]`, `[Install]`, `[Service]` last), `site-data.service` (with `data.dir`),
-  `site-nextjs.service`. `github_known_hosts` is copied data (GitHub's SSH host keys, used by git's ssh as is).
+  `site-nextjs.service`; `sudoers-ci` and `authorized_keys` (one key line, no marker: setup writes
+  the marker as the file's first line). `github_known_hosts` is copied data (GitHub's SSH host keys,
+  used by git's ssh as is).
+- `examples/` — `deploy.yml` and `rollback.yml`, the GitHub Actions workflows of plan §5.4, kept
+  identical to the plan's code blocks by a test in `test/unit/remote.bats`.
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`; the temp-root deploy
   harness, `deploy_setup`, `host`, `commit` and friends, in `test/unit/deploy_helpers.bash`, shared by
@@ -69,14 +81,16 @@ in step with the code.
   (`/var/lib/shipit`), `SRV_ROOT` (`/srv`), `CADDY_ETC` (`/etc/caddy`), `LOG_ROOT`
   (`/var/log/shipit`), `OS_RELEASE` (`/etc/os-release`), `APT_ETC` (`/etc/apt`), `SSH_ETC`
   (`/etc/ssh`), `FAIL2BAN_ETC` (`/etc/fail2ban`), `ROOT_HOME` (`/root`), `SYSTEMD_DIR`
-  (`/etc/systemd/system`), `CACHE_ROOT` (`/var/cache`) and `SHIPIT_TEMPLATES` (`templates/` next to
-  `lib/`). Never read them from the environment or add flags for them; tests reassign them after
-  sourcing. Lock helpers take the lock path. Tests stub commands such as `id`, `mv`, `systemctl`,
-  `apt-get`, `ufw`, `sshd`, `runuser`, `caddy`, `journalctl`, `dpkg-query`, `useradd`, `getent`,
-  `chown`, `setfacl`, `systemd-analyze` and `curl` through `PATH`, so call commands by name (no
-  absolute paths, no `$EUID`). Deploy tests run git for real: the stubbed `runuser` runs commands as
+  (`/etc/systemd/system`), `CACHE_ROOT` (`/var/cache`), `CI_HOME` (`/home/ci`), `SUDOERS_DIR`
+  (`/etc/sudoers.d`) and `SHIPIT_TEMPLATES` (`templates/` next to `lib/`). Never read them from the
+  environment or add flags for them; tests reassign them after sourcing. Lock helpers take the lock
+  path. Tests stub commands such as `id`, `mv`, `systemctl`, `apt-get`, `ufw`, `sshd`, `runuser`,
+  `caddy`, `journalctl`, `dpkg-query`, `useradd`, `getent`, `chown`, `setfacl`, `systemd-analyze`,
+  `visudo` and `curl` through `PATH`, so call commands by name (no absolute paths, no `$EUID`). Deploy tests run git for real: the stubbed `runuser` runs commands as
   the test user, `BUILD_PATH` (lib/deploy.sh) gets the stubs prepended, and `url.<local
   repo>.insteadOf` in the build user's `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
+- **The only environment input is `$SSH_ORIGINAL_COMMAND`**, read by `shipit remote` and parsed
+  strictly (it's what CI asked for, not a setting).
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value read from a config or `shipit.ini`, or typed by a person, before
   using it.
@@ -113,9 +127,9 @@ in step with the code.
 ## Making a change
 
 Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`), M2
-(`shipit setup`, without `--ci-key`, which comes with M6), M3 (`shipit deploy` for static sites),
-M4 (node and Next.js deploys, health check, auto-revert) and M5 (`shipit rollback`) are implemented;
-M6–M7 are to do.
+(`shipit setup`), M3 (`shipit deploy` for static sites), M4 (node and Next.js deploys, health
+check, auto-revert), M5 (`shipit rollback`) and M6 (`setup --ci-key`, the `ci` user, `shipit
+remote`, `examples/`) are implemented; M7 is to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.

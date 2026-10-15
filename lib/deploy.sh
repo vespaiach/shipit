@@ -208,18 +208,6 @@ prune_refs() {
   done
 }
 
-# site_user_state <user> <comment>: prints missing, shipit (its GECOS field is <comment>, so deploy
-# made it) or other.
-site_user_state() {
-  local entry gecos
-  if ! entry=$(getent passwd "$1"); then
-    echo missing
-    return 0
-  fi
-  IFS=: read -r _ _ _ _ gecos _ <<<"$entry"
-  if [ "$gecos" = "$2" ]; then echo shipit; else echo other; fi
-}
-
 # ---- Running things as the build user ------------------------------------------------------------
 
 # as_build <command> [arg]...: runs a command as <name>-build with umask 027, a clean environment
@@ -464,16 +452,16 @@ site_users() {
   for user in "$SITE" "$BUILD_USER"; do
     comment="shipit site $SITE"
     [ "$user" = "$SITE" ] || comment="shipit build $SITE"
-    if [ "$(site_user_state "$user" "$comment")" = other ]; then
+    if [ "$(user_state "$user" "$comment")" = other ]; then
       die "A user named $user already exists, and shipit didn't create it, so the site can't be called $SITE. Pick another name."
     fi
   done
-  if [ "$(site_user_state "$SITE" "shipit site $SITE")" = missing ]; then
+  if [ "$(user_state "$SITE" "shipit site $SITE")" = missing ]; then
     useradd --system --user-group --no-create-home --home-dir /nonexistent --shell "$NOLOGIN" \
       --comment "shipit site $SITE" "$SITE" || die "Creating the user $SITE failed."
     log "Created the user $SITE."
   fi
-  if [ "$(site_user_state "$BUILD_USER" "shipit build $SITE")" = missing ]; then
+  if [ "$(user_state "$BUILD_USER" "shipit build $SITE")" = missing ]; then
     useradd --system --gid "$SITE" --no-create-home --home-dir "$SITE_DIR/home" --shell "$NOLOGIN" \
       --comment "shipit build $SITE" "$BUILD_USER" || die "Creating the user $BUILD_USER failed."
     log "Created the user $BUILD_USER."
