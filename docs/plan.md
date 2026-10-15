@@ -1,13 +1,14 @@
 # shipit — plan
 
-A small bash tool that does four things:
+A small bash tool that does five things:
 
 1. `shipit setup` — prepare a VPS for atomic, symlink-based deploys.
 2. `shipit deploy <name> [ref]` (or `<repo-url> <name> [ref]`) — build a website from GitHub and switch to it.
 3. `shipit rollback <name>` — go back exactly one version.
 4. `shipit delete <name>` — delete a site and its data, after asking (5.6).
+5. `shipit uninstall` — remove shipit, every site and its data, after asking (5.7).
 
-Every command runs by hand over SSH, and only a site's first deploy and `delete` ask questions (`ssh -t`, or piped
+Every command runs by hand over SSH, and only a site's first deploy, `delete` and `uninstall` ask questions (`ssh -t`, or piped
 answers; decision 69). Several sites share one VPS.
 
 Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state folders,
@@ -518,6 +519,46 @@ site, and running it again finishes the job: every step skips what's already gon
 `/var/lib/shipit/<name>.lock` stays (empty): a deploy already waiting on it would otherwise hold a lock
 on a deleted file while a new command makes a new one, and both would run.
 
+### 5.7 `shipit uninstall`
+
+Removes shipit from the VPS: every site, what setup wrote, the old CI user, and shipit itself (decision
+71). Packages stay installed and ufw stays on.
+
+1. Refused, changing nothing: any argument ("Usage: shipit uninstall (it takes no arguments)").
+2. Confirm, before any lock: print on stderr "This uninstalls shipit. It deletes:", then one line per
+   group: the sites (by name, every valid `<name>` with a `<name>.conf`; left out when there are none),
+   shipit's Caddyfile (Caddy is stopped), fail2ban jail, unattended-upgrades file and SSH drop-in
+   (password logins follow sshd's own settings again), the Caddy and NodeSource apt sources and keys
+   (the packages stay, without updates from those repos), the firewall's 80/tcp, 443/tcp and 443/udp
+   rules (ufw stays on), and `/etc/shipit`, `/var/lib/shipit`, `/var/log/shipit`, the old ci user and
+   shipit itself. When a site has `/var/lib/shipit-<name>`: "Site data goes too: <folders>. shipit keeps
+   no backup: copy it first if you may need it." Then "It can't be undone." and `Type uninstall to go
+   on:`, reading one line from stdin. Only `uninstall` exactly goes on. No input: "Nothing was removed:
+   there was no answer. Run it in a terminal (ssh -t), or pipe the answer: echo uninstall | shipit
+   uninstall". Any other answer: "Nothing was removed: the answer wasn't uninstall."
+3. Each site is deleted as 5.6 step 3 and 4 do it (`delete_site`: its lock, Caddy file, unit,
+   processes, folders, env file, users, `<name>.conf` last, the deploy key reminder), one after the
+   other.
+4. Then, each file only if it has the marker (otherwise "<file> wasn't written by shipit, so it was
+   left alone."): any `.caddy` left in `/etc/caddy/sites/`; `/etc/caddy/Caddyfile`, then `systemctl
+   disable --now caddy`; `/etc/caddy/sites/` if it's empty; the fail2ban jail (reload fail2ban);
+   `52shipit-auto-upgrades`; `10-shipit.conf` (reload ssh); `caddy-stable.list` and `nodesource.list`,
+   each with its keyring (a keyring has no marker, so it goes only with its list); `shipit-nodejs`.
+   `ufw delete allow` 80/tcp, 443/tcp and 443/udp (ufw skips a rule it doesn't have); the defaults, the
+   SSH rule and ufw itself are kept.
+5. The ci user of decision 68: `/etc/sudoers.d/shipit-ci` (marked), and the user `ci` with GECOS
+   `shipit ci` (its processes killed, `userdel`, `/home/ci` deleted). A `ci` user that isn't shipit's
+   is ignored.
+6. `rm -rf` `/etc/shipit`, `/var/lib/shipit` (the lock files) and `/var/log/shipit`. `/srv` stays: it's
+   the system's.
+7. Last, shipit itself: `/usr/local/bin/shipit` if it's install.sh's link to
+   `/usr/local/lib/shipit/bin/shipit`, then `/usr/local/lib/shipit`. Print "Uninstalled shipit." and
+   that the packages are still there (remove them with `apt-get purge`).
+
+Every step skips what's already gone, and the sites' `.conf` files go before `/etc/shipit`, so an
+uninstall that stops half-way is finished by running it again (from a checkout, if shipit itself was
+already deleted).
+
 ## 6. Templates
 
 - `Caddyfile` — global options, `import /etc/caddy/sites/*.caddy`.
@@ -555,7 +596,7 @@ Each template gets a golden file and a unit test (kept from the old tool).
 ## 7. Code layout
 
 ```
-bin/shipit           dispatcher: setup | deploy | rollback | delete | help
+bin/shipit           dispatcher: setup | deploy | rollback | delete | uninstall | help
 lib/common.sh        log/err/die, validators, locks, render, install_if_changed, atomic_link, health_ok
 lib/config.sh        shipit.ini reading + validation (git config) and the first-deploy questions
                      (ini_ask), check_env_key, site .conf read/write
@@ -563,6 +604,7 @@ lib/setup.sh
 lib/deploy.sh        resolve → ask (shipit.ini, env file) → build → switch → prune
 lib/rollback.sh
 lib/delete.sh        confirm → caddy → unit → folders → users → conf (5.6)
+lib/uninstall.sh     confirm → every site (delete_site) → setup's files → ci → folders → itself (5.7)
 templates/
 install.sh
 test/unit/*.bats, test/golden/, test/fixtures/   (make: lint + bats, CI unchanged)
@@ -653,3 +695,4 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 68 | CI deployment removed | **No `ci` user, no `shipit remote`, no `--ci-key`, no sudoers rule, no known_hosts output, no workflow examples.** Deploys and rollbacks are run by hand as root (over SSH if you like). Removed with it: decisions 16, 18 and 62–66, which only concerned CI. Numbers of the other decisions, setup steps (6 and 8 are now empty) and sections (5.4) are kept so references stay valid. An existing VPS keeps its `ci` user, `/etc/sudoers.d/shipit-ci` and `/home/ci/.ssh/authorized_keys`: setup no longer touches them, so remove them by hand (`userdel ci`, `rm /etc/sudoers.d/shipit-ci`, `rm -r /home/ci`). |
 | 69 | Site config on the server | **`shipit.ini` is `/srv/<name>/config/shipit.ini`** (root:root, mode 600, in a root-only `config/` of mode 00700), not in the repo. It is built by prompts on the site's first deploy (5.2 A.2b) and read by `deploy` only, on every deploy, so an edit takes effect on the next one; `deploy` and `rollback` already take `<name>`, so the command line is unchanged. The first deploy also offers to create `<name>.env` from `KEY=VALUE` prompts (5.2 A.2c). Rollback and revert never read, restore or apply it (5.5): they swap links, restart and health-check, with TYPE, DOMAIN and PORT from `<name>.conf`; so there's no per-release copy, and a config change is rolled forward by editing the file, not back. **`site.health` is removed**: the check always polls `/` and accepts a status below 500 (decision 56), which keeps a custom path and a strict mode out of `<name>.conf`. The pin `refs/shipit/<sha>`, which only kept a release's `shipit.ini` readable after a force-push, is gone with the repo copy. Version stays 1.0.0 and there is no import or fallback for the old layout: the server file is how 1.0.0 works. Rejected: keeping the repo file and copying it per release (the config would still travel with the code, and a rollback re-render could still fail); restoring the old config on rollback. Consequences: a deploy whose config breaks the site is reverted in code only; rolling back across a `static.root` change can leave Caddy serving a folder the older release lacks (5.5). |
 | 70 | Deleting a site | **`shipit delete <name>` deletes everything shipit made for the site, its data in `/var/lib/shipit-<name>` included, after the admin types the site's name** (5.6). Typing the name, not y/N, because Enter on a y/N habit would cost a site; piping it (`echo <name> \| shipit delete <name>`) keeps it scriptable, as the first deploy's answers are. No `--yes` flag (shipit takes no flags). It asks before taking the site lock, so a deploy isn't blocked by a prompt, and deletes `<name>.conf` last so a rerun finishes a half-done delete. Data is deleted too: keeping it would leave a `/var/lib/shipit-<name>` that a new site of the same name would inherit; the prompt names the folder and says to copy it first. Files without the marker and users without shipit's GECOS are left alone, as setup and deploy treat them. The lock file is kept (5.6). The deploy key on GitHub can't be removed from the VPS, so it's printed as a reminder. New seam: `STATE_ROOT` (`/var/lib`) in `lib/common.sh`; tests stub `userdel` and `pkill`. |
+| 71 | Uninstalling shipit | **`shipit uninstall` removes what shipit made: every site as `delete` removes it (data and users included), the files setup wrote, the CI user and sudoers rule of decision 68, `/etc/shipit`, `/var/lib/shipit`, `/var/log/shipit`, and its own install** (5.7), after the admin types `uninstall` (as `delete` asks for the name, decision 70). Kept: **the packages** (sudo, git or curl may predate shipit, and removing them can break the host; the closing message says to `apt-get purge` what isn't needed), corepack (installed with npm, like a package), **ufw itself** with its defaults and SSH rule (turning it off would leave the host open; only the 80/443 rules go), and `/srv`. Its SSH drop-in is deleted too, so password logins follow sshd's own settings again: the prompt says so. Caddy is stopped and disabled when its Caddyfile was shipit's, since nothing is left to serve. Apt keyrings carry no marker, so each goes only with the shipit list that uses it. Files without the marker and users without shipit's GECOS are left alone. No new lock: each site is deleted under its own lock, as `delete` does. New seams in `lib/uninstall.sh`: `INSTALL_DIR`, `INSTALL_LINK`, `SUDOERS_DIR`, `CI_HOME`; tests stub `ufw`. |

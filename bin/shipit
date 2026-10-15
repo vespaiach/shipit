@@ -14,6 +14,7 @@ Usage: sudo shipit <command> [arguments]
   deploy <repo-url> <name> [ref]     The same, for a site's first deploy
   rollback <name>                    Go back to the previous release
   delete <name>                      Delete a site and its data (asks first)
+  uninstall                          Remove shipit, every site and its data (asks first)
   help                               Show this help
 EOF
 }
@@ -29,7 +30,7 @@ main() {
       usage >&2
       return 1
       ;;
-    setup | deploy | rollback | delete) ;;
+    setup | deploy | rollback | delete | uninstall) ;;
     *)
       printf "Unknown command: %s. Run 'shipit help' for the list.\n" "$cmd" >&2
       return 1

@@ -7,10 +7,11 @@ each of them from its GitHub repo:
 - `shipit deploy` builds a site from GitHub on the VPS and switches to it atomically.
 - `shipit rollback` goes back one release.
 - `shipit delete` deletes a site, after you type its name.
+- `shipit uninstall` removes shipit, every site and its data, after you type `uninstall`.
 
 Sites can be `static` (Caddy serves a folder), `node` (any server listening on `$PORT`) or `nextjs`.
 Caddy is the web server for all of them and gets their TLS certificates automatically. Only a site's
-first deploy asks questions (its config and its secrets), and `delete` asks you to confirm; every
+first deploy asks questions (its config and its secrets), and `delete` and `uninstall` ask you to confirm; every
 other command works over SSH from a laptop, with no terminal.
 
 [docs/plan.md](docs/plan.md) is the full spec, with the reasons behind each choice. This README is the
@@ -28,7 +29,8 @@ manual.
 8. [Logs](#logs)
 9. [Server layout and security](#server-layout-and-security)
 10. [Deleting a site](#deleting-a-site)
-11. [Limitations](#limitations)
+11. [Uninstalling shipit](#uninstalling-shipit)
+12. [Limitations](#limitations)
 13. [Development](#development)
 
 ## Requirements
@@ -451,6 +453,40 @@ Type docs to delete it:
   user it didn't create, is left alone and named. The empty lock file `/var/lib/shipit/<name>.lock` is
   kept on purpose.
 - A private repo's deploy key is on GitHub, out of shipit's reach: it prints the link to remove it.
+
+## Uninstalling shipit
+
+```bash
+ssh -t root@vps shipit uninstall
+```
+
+It lists what goes and asks you to type `uninstall` (exactly; anything else removes nothing):
+
+```
+This uninstalls shipit. It deletes:
+- the sites docs blog, as shipit delete does: releases, repos, shipit.ini, env files, Caddy files, units, caches, logs, data and users
+- shipit's Caddyfile (Caddy is stopped), fail2ban jail, unattended-upgrades file and SSH drop-in (password logins follow sshd's own settings again)
+- the Caddy and NodeSource apt sources and keys (the packages stay installed, but get no more updates from those repos)
+- the firewall's 80/tcp, 443/tcp and 443/udp rules (ufw stays on, SSH allowed)
+- /etc/shipit, /var/lib/shipit, /var/log/shipit, the old ci user, and shipit itself
+It can't be undone.
+Type uninstall to go on:
+```
+
+- **Every site goes**, as [`shipit delete`](#deleting-a-site) deletes it: **its data in
+  `/var/lib/shipit-<name>` too** (the prompt names it), and the users `<name>` and `<name>-build`.
+- **What setup wrote goes**: `/etc/caddy/Caddyfile` (Caddy is then stopped and disabled), the fail2ban
+  jail, `52shipit-auto-upgrades`, the SSH drop-in `10-shipit.conf`, the Caddy and NodeSource apt sources,
+  keys and pin, the 80/443 firewall rules, `/etc/shipit`, `/var/lib/shipit` and `/var/log/shipit`. So does
+  the `ci` user (with `/etc/sudoers.d/shipit-ci` and `/home/ci`) that shipit made before CI was removed.
+- **SSH password logins** follow sshd's own settings again once the drop-in is gone: add your own
+  `PasswordAuthentication no` if you want to keep them off.
+- **Kept**: the packages (caddy, nodejs, corepack, ufw, fail2ban, ...; `apt-get purge` the ones you don't
+  need), ufw itself with SSH allowed, and `/srv`. A file shipit didn't write, or a user it didn't
+  create, is left alone and named.
+- Last, shipit deletes itself (`/usr/local/lib/shipit` and the `/usr/local/bin/shipit` link). If it
+  stops half-way, run it again (from a checkout, if shipit is already gone): it skips what's done.
+- **Without a terminal** it refuses, unless you pipe the answer: `echo uninstall | ssh root@vps shipit uninstall`.
 
 ## Limitations
 
