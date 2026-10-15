@@ -63,15 +63,10 @@ delete_user() {
   esac
 }
 
-cmd_delete() {
-  local unit path key
-  delete_args "$@" || exit 1
-  SITE_DIR=$SRV_ROOT/$SITE BUILD_USER=$SITE-build
-  unit=$SYSTEMD_DIR/shipit-$SITE.service key=$SITE_DIR/.ssh/id_ed25519
-
-  # An unknown site is refused before asking, and before the lock, so it leaves no lock file behind.
-  site_conf_read "$SITE" || exit 1
-  delete_confirm
+# delete_site: deletes SITE (SITE_DIR and BUILD_USER set) under its lock, <name>.conf last (plan §5.6
+# steps 3 and 4). Shared with uninstall.
+delete_site() {
+  local unit=$SYSTEMD_DIR/shipit-$SITE.service key=$SITE_DIR/.ssh/id_ed25519 path
   site_lock
   site_conf_read "$SITE" || exit 1
 
@@ -100,4 +95,13 @@ cmd_delete() {
   if [ -n "$key" ]; then
     log "Remove its deploy key from GitHub too: https://github.com/$(repo_slug "$CONF_REPO")/settings/keys"
   fi
+}
+
+cmd_delete() {
+  delete_args "$@" || exit 1
+  SITE_DIR=$SRV_ROOT/$SITE BUILD_USER=$SITE-build
+  # An unknown site is refused before asking, and before the lock, so it leaves no lock file behind.
+  site_conf_read "$SITE" || exit 1
+  delete_confirm
+  delete_site
 }

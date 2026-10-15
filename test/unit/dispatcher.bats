@@ -22,7 +22,7 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 @test "help lists every public command, with plan §5's arguments" {
   run "$shipit" help
   for line in '  setup ' '  deploy <name> [ref] ' \
-    '  deploy <repo-url> <name> [ref] ' '  rollback <name> ' '  delete <name> ' '  help '; do
+    '  deploy <repo-url> <name> [ref] ' '  rollback <name> ' '  delete <name> ' '  uninstall ' '  help '; do
     [[ $output == *"$line"* ]] || {
       echo "missing: $line"
       return 1
@@ -47,7 +47,7 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "every command except help needs root" {
   as_user
-  for cmd in setup deploy rollback delete; do
+  for cmd in setup deploy rollback delete uninstall; do
     run "$shipit" "$cmd" blog
     [ "$status" -eq 1 ]
     [ "$output" = "Run this as root, or with sudo: sudo shipit $cmd blog" ] || {
