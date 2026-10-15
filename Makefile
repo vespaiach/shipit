@@ -1,5 +1,5 @@
 # Local checks. `make` runs lint and the unit tests; it's the gate before merging.
-SHELL_FILES = $(shell shfmt -f bin lib libexec install.sh test 2>/dev/null)
+SHELL_FILES = $(shell shfmt -f bin lib install.sh test 2>/dev/null)
 BASH_FILES = $(filter-out %.bats,$(SHELL_FILES))
 
 .PHONY: all lint test

@@ -1,9 +1,0 @@
-{
-  "name": "node-app",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "build": "node build.js",
-    "db:migrate": "sh migrate.sh"
-  }
-}

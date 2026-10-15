@@ -1,38 +1,22 @@
 #!/usr/bin/env bash
-# shipit: set up a Debian 13 VPS for Next.js apps, and deploy them from GitHub. See `shipit help`.
+# shipit: set up a Debian or Ubuntu VPS, and deploy websites onto it from GitHub. See `shipit help`.
 set -euo pipefail
 
 # Installed as /usr/local/lib/shipit/bin/shipit (linked from /usr/local/bin), or run from a checkout.
 SHIPIT_LIB=$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)
 
+# `remote` isn't listed: only the ci user's forced command runs it (plan §5.4).
 usage() {
   cat <<'EOF'
 Usage: sudo shipit <command> [arguments]
 
-  setup                              Prepare this VPS once (safe to re-run)
-  deploy <github-url | app> [--ref <sha>]
-                                     Deploy a new app, or redeploy an existing one
-  rollback <app>                     Switch back to the previous release
-  status [app]                       Show releases, processes, health and backups
-  logs <app> [process | access | deploy]
-                                     Follow an app's log files
-  env <app>                          Edit an app's environment file
-  backup <app>                       Take a backup now (database or state folder)
-  restore <app> [file | latest]      Restore a backup
+  setup [--ci-key <name> <public key file | ->]...
+                                     Prepare this VPS (safe to re-run)
+  deploy <name> [ref]                Build a site from GitHub and switch to it
+  deploy <repo-url> <name> [ref]     The same, for a site's first deploy
+  rollback <name>                    Go back to the previous release
   help                               Show this help
 EOF
-}
-
-# Runs lib/<command>.sh's cmd_<command> once a milestone adds it.
-run_command() {
-  local cmd=$1
-  shift
-  # shellcheck source=lib/common.sh
-  . "$SHIPIT_LIB/common.sh"
-  [ -f "$SHIPIT_LIB/$cmd.sh" ] || die "shipit $cmd is not implemented yet."
-  # shellcheck source=/dev/null
-  . "$SHIPIT_LIB/$cmd.sh"
-  "cmd_$cmd" "$@"
 }
 
 main() {
@@ -46,7 +30,7 @@ main() {
       usage >&2
       return 1
       ;;
-    setup | deploy | rollback | status | logs | env | backup | restore) ;;
+    setup | deploy | rollback | remote) ;;
     *)
       printf "Unknown command: %s. Run 'shipit help' for the list.\n" "$cmd" >&2
       return 1
@@ -57,7 +41,11 @@ main() {
     return 1
   fi
   shift
-  run_command "$cmd" "$@"
+  # shellcheck source=lib/common.sh
+  . "$SHIPIT_LIB/common.sh"
+  # shellcheck source=/dev/null
+  . "$SHIPIT_LIB/$cmd.sh"
+  "cmd_$cmd" "$@"
 }
 
 main "$@"

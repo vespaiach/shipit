@@ -1,4 +1,4 @@
-# shipit — plan (v2)
+# shipit — plan
 
 A small bash tool that does three things:
 
@@ -9,8 +9,8 @@ A small bash tool that does three things:
 Everything runs non-interactively, so each command can be run over SSH from a laptop or from GitHub
 Actions. Several sites share one VPS.
 
-Out of scope (removed from v1): PostgreSQL, backups/restore, state folders, `env`/`logs`/`status`
-commands, nftables, per-process units, swap sizing, Tracklite reference scripts.
+Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state folders,
+`env`/`logs`/`status` commands, nftables, per-process units, swap sizing, Tracklite reference scripts.
 
 ---
 
@@ -18,7 +18,7 @@ commands, nftables, per-process units, swap sizing, Tracklite reference scripts.
 
 | Constraint | Consequence |
 |---|---|
-| Debian 13+ or Ubuntu 26.04+ | `setup` reads `/etc/os-release`: `ID=debian` with `VERSION_ID >= 13`, or `ID=ubuntu` with `VERSION_ID >= 26.04`. Anything else is refused. Both use apt, systemd and bash 5, so one code path covers them. Ubuntu 26.04 ships sudo-rs and the Rust coreutils, so e2e checks the sudoers line, `visudo -cf` and `mv -T` on both. |
+| Debian 13+ or Ubuntu 26.04+ | `setup` reads `/etc/os-release`: `ID=debian` with `VERSION_ID >= 13`, or `ID=ubuntu` with `VERSION_ID >= 26.04`. Anything else is refused. Both use apt, systemd and bash 5, so one code path covers them. Ubuntu 26.04 ships sudo-rs and the Rust coreutils, so the sudoers line, `visudo -cf` and `mv -T` must be checked by hand on Ubuntu as well as Debian. |
 | Caddy is the only web server | Caddy (stable apt repo) listens on 80/443, gets TLS certificates, serves static sites and proxies Node/Next.js sites. nginx is **not** installed. |
 | Node.js LTS | NodeSource apt repo for the LTS major current when `setup` first runs (looked up in `nodejs.org/dist/index.json` with `jq`). The major is recorded in `/etc/shipit/host.conf` and never changed automatically; re-running `setup` keeps it. |
 | One rollback version | After a deploy finishes, each site keeps at most two releases: `current` and `previous`. Every successful deploy deletes the rest. |
@@ -125,10 +125,10 @@ Parsing rules:
 - `--no-includes` is always passed, so a repo can't use `[include]` to make the parser read other files.
 - Only the sections `site`, `node`, `static` and `data` are allowed. Unknown sections or keys are
   rejected (checked against `--list`), so a typo like `domian` fails the deploy instead of being ignored.
-- Every value is a string and is validated before use (v1 rule kept). git config turns escapes like
-  `\n` in a value into real characters, so each key has its own pattern and control characters are never
-  allowed. A single-value key given more than once is rejected; only `site.alias`, `site.env` and
-  `data.dir` may repeat.
+- Every value is a string and is validated before use (kept from the old tool). git config turns
+  escapes like `\n` in a value into real characters, so each key has its own pattern and control
+  characters are never allowed. A single-value key given more than once is rejected; only
+  `site.alias`, `site.env` and `data.dir` may repeat.
 - Validation, including the domain clash check (5.2 A.3), runs every time a `shipit.ini` is used:
   before a build (5.2 A.3) and before every render (5.5), so a revert or rollback never renders a value
   that wasn't checked against the other sites as they are now.
@@ -276,7 +276,7 @@ Idempotent: re-running changes no file whose content is already right.
 
 Bootstrap from your laptop:
 ```bash
-ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v2.0.0.tar.gz | tar -xz && cd shipit-2.0.0 && ./install.sh'
+ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v1.0.0.tar.gz | tar -xz && cd shipit-1.0.0 && ./install.sh'
 ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub
 ```
 The last lines `setup` prints are the known_hosts lines: replace `<host>` and save them as the GitHub
@@ -341,10 +341,10 @@ C. **Switch** (site lock still held)
    1. Remember where `previous` points, then `previous` → old `current`; `current` → new release (both
       atomic).
    2. Render the Caddy file and unit from the `shipit.ini` of the new `current` (section 5.5) and
-      validate them, then write TYPE, DOMAIN and ALIASES to `<name>.conf`. Reload Caddy if the Caddy
-      file changed; `daemon-reload` if the unit changed (including `data.dir`); on a first deploy,
-      `systemctl enable` the unit so the site comes back after a reboot. If rendering or validating
-      fails, revert (step 4) and exit non-zero.
+      validate them, then write TYPE, DOMAIN and ALIASES to `<name>.conf`. Reload (never restart)
+      Caddy if the Caddy file changed; `daemon-reload` if the unit changed (including `data.dir`); on
+      a first deploy, `systemctl enable` the unit so the site comes back after a reboot. If rendering
+      or validating fails, revert (step 4) and exit non-zero.
    3. Node/Next.js: restart `shipit-<name>` (`nextjs`: stop, `systemctl clean --what=cache`, start, so
       a release never sees another release's cache), then poll `http://127.0.0.1:$PORT$health` with
       `Host: $domain` for up to 60 s. Static: nothing restarts; Caddy is reloaded only if its file
@@ -492,13 +492,13 @@ name, which only root sets and the build user can't rename, and the commit is pi
   `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's SSH host keys, copied, not
   rendered).
 
-Each template gets a golden file and a unit test (v1 rule kept).
+Each template gets a golden file and a unit test (kept from the old tool).
 
 ## 7. Code layout
 
 ```
 bin/shipit           dispatcher: setup | deploy | rollback | remote | help
-lib/common.sh        log/err/die, validators, locks, render, install_if_changed, atomic_link  (ported)
+lib/common.sh        log/err/die, validators, locks, render, install_if_changed, atomic_link, health_ok
 lib/config.sh        shipit.ini reading + validation (git config), site .conf read/write
 lib/setup.sh
 lib/deploy.sh        resolve → build → switch → prune
@@ -507,23 +507,24 @@ lib/remote.sh
 templates/
 install.sh
 test/unit/*.bats, test/golden/, test/fixtures/   (make: lint + bats, CI unchanged)
-test/e2e/            Incus VMs: one Debian 13, one Ubuntu 26.04
 ```
 
-Ported from v1: `render`, `install_if_changed`, lock helpers, `check_domain`, `check_port`,
-`health_ok`, atomic symlink switch, "validate temp copy then install", "root never runs repo code".
+Kept from the old tool: `render`, `install_if_changed`, lock helpers, `check_domain`, `check_port`,
+`health_ok`, the atomic symlink switch (`atomic_link <target> <link>`), "validate temp copy then
+install", "root never runs repo code". `check_domain` and `check_port` check syntax only; the clash
+checks against other sites (5.2 A.3) use the site configs, so they come with `lib/config.sh`.
 
 ## 8. Milestones
 
 | # | Deliverable | Verified by |
 |---|---|---|
-| M0 | Delete v1 code, new skeleton, dispatcher, ported helpers, CI green | `make` |
+| M0 | Delete the old tool's code, new skeleton, dispatcher, helpers kept from the old tool, CI green | `make` |
 | M1 | `shipit.ini` parser + validators | bats (fixtures for every key and error, including an unknown key, a duplicate single-value key, an `[include]` attempt, an unquoted `#` in a value, an invalid `data.dir` (`../x`, `a/b`), `[data]` on a static site, a first-deploy name that differs from `site.name`, a `node.start` with `\n`, `'` or `%`, a `static.root` of `../x`, a `site.health` with a space, and a ref starting with `-`) |
-| M2 | `setup` (incl. SSH hardening, firewall) | bats for rendered files; e2e on Debian 13 and Ubuntu 26.04 (incl. the fail2ban `sshd` jail is active; `corepack` is enabled; the sudoers line, `visudo -cf` and `mv -T` work with Ubuntu's sudo-rs and Rust coreutils) |
-| M3 | `deploy` static | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) + e2e (the first static deploy is served without restarting Caddy; `caddy` can't read `repo.git`, the env file or files outside `<root>`; a symlink out of `<root>` fails the deploy; after a deploy the release is owned by root; change `static.root` in a commit, deploy, roll back, the old root is served again; a private repo's first deploy prints the key, and the rerun after adding it completes; `<name>-build` can't replace `current` or rename a release; release files aren't world-readable; a failed deploy keeps `previous`; a request to the site appends a line to its `access.log` without its query string, and the folder is caddy:caddy 0750) |
-| M4 | `deploy` node / nextjs + health check + auto-revert + data folder | bats (golden `site-proxy.caddy` and `site.service`) + e2e (incl. `<name>-build` can't read the env file or the data folder; install doesn't see secrets, build does; the unit is enabled and comes back after a reboot; a failed first deploy leaves nothing served and can be rerun; the data folder exists with owner `<name>:<name>` and survives a deploy and a rollback; a failed health check restores the old unit and `previous`; a `static.root`-style config change is undone by rollback; `next start` writes `.next/cache`, and the cache is emptied on deploy and rollback) |
-| M5 | `rollback` | bats + e2e (rollback restores the previous release's Caddy file and unit; a rollback that fails its health check swaps back; rollback still works after a force-push and `git gc --prune=now`) |
-| M6 | `remote` + CI user + GitHub Actions example | bats (command parsing) + e2e over SSH (connects with `StrictHostKeyChecking=yes` using the lines setup printed; a wrong host key makes the connection fail; site A's key can't deploy or roll back site B; `VPS_PORT` on a non-22 port; a `--ci-key` file with two lines or key options is refused; a ref like `--upload-pack=x` is refused) |
+| M2 | `setup` (incl. SSH hardening, firewall) | bats (golden files for every rendered file) |
+| M3 | `deploy` static | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
+| M4 | `deploy` node / nextjs + health check + auto-revert + data folder | bats (golden `site-proxy.caddy` and `site.service`) |
+| M5 | `rollback` | bats |
+| M6 | `remote` + CI user + GitHub Actions example | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten | review |
 
 ## 9. Decisions
@@ -539,7 +540,7 @@ Ported from v1: `render`, `install_if_changed`, lock helpers, `check_domain`, `c
 | 7 | SSH hardening | **On**, guarded by the key-login check in 5.1 step 7. |
 | 8 | Downtime on Node/Next.js deploy | **Accepted**: a ~1–3 s gap while the unit restarts. No blue/green. |
 | 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/log/shipit/<name>`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
-| 10 | Rewrite approach | **Fresh rewrite** on a new branch; port the v1 helpers listed in section 7. |
+| 10 | Rewrite approach | **Fresh rewrite** on a new branch; keep the old tool's helpers listed in section 7. |
 | 11 | Who runs shipit | **Root.** Repo code only ever runs as `<name>-build` (build) or `<name>` (runtime). Running shipit itself as an unprivileged user was considered and rejected: it needs two privilege modes, an extra command and sudo rules for restarts anyway, and the CI path is already limited by the forced command plus strict `shipit remote` parsing. |
 | 12 | Repo config format | **`shipit.ini`, in git's config dialect.** It allows comments, is easy to read, adds no dependency (`git` is already installed), and `git config` is a strict, well-specified parser that exits non-zero on bad syntax. Considered: JSON (no comments) and YAML (needs python3 + yq, has YAML 1.1 quirks, and is a bigger parser to run on untrusted input). |
 | 13 | Site data | **`/var/lib/shipit-<name>` (0700) via systemd `StateDirectory=`, opt-in with `[data]`, node/nextjs only.** No backups, no Caddy-served folders. Not inside `/srv/<name>`: that tree holds code, the build user owns the release folders and `repo.git`, and releases are deleted on prune. `$STATE_DIRECTORY` is a `:`-joined list when `data.dir` is set; this is documented rather than worked around. |

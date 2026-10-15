@@ -1,7 +1,0 @@
-[
-{"version":"v25.1.0","date":"2026-10-07","files":["linux-x64"],"npm":"11.6.2","lts":false,"security":false},
-{"version":"v24.10.0","date":"2026-10-01","files":["linux-x64"],"npm":"11.6.1","lts":"Krypton","security":false},
-{"version":"v25.0.0","date":"2026-09-20","files":["linux-x64"],"npm":"11.6.0","lts":false,"security":false},
-{"version":"v22.20.0","date":"2026-09-24","files":["linux-x64"],"npm":"10.9.3","lts":"Jod","security":true},
-{"version":"v24.9.0","date":"2026-09-10","files":["linux-x64"],"npm":"11.6.0","lts":"Krypton","security":false}
-]

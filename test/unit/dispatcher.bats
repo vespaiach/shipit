@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2016,SC2034 # stub bodies are single-quoted on purpose; tests set lib variables
+# shellcheck disable=SC2016 # stub bodies are single-quoted on purpose
 # bin/shipit: command names, the root check, help and the unknown-command message.
 
 setup() {
@@ -19,14 +19,20 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
   done
 }
 
-@test "help lists every command" {
+@test "help lists every public command, with plan §5's arguments" {
   run "$shipit" help
-  for cmd in setup deploy rollback status logs env backup restore help; do
-    [[ $output == *"  $cmd "* ]] || {
-      echo "missing $cmd"
+  for line in '  setup [--ci-key <name> <public key file | ->]...' '  deploy <name> [ref] ' \
+    '  deploy <repo-url> <name> [ref] ' '  rollback <name> ' '  help '; do
+    [[ $output == *"$line"* ]] || {
+      echo "missing: $line"
       return 1
     }
   done
+}
+
+@test "help leaves out the internal remote command" {
+  run "$shipit" help
+  [[ $output != *remote* ]]
 }
 
 @test "no command prints usage and fails" {
@@ -37,17 +43,19 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "unknown command is refused, even as root" {
   as_root
-  run "$shipit" frobnicate
-  [ "$status" -eq 1 ]
-  [ "$output" = "Unknown command: frobnicate. Run 'shipit help' for the list." ]
+  for cmd in frobnicate status logs env backup restore; do
+    run "$shipit" "$cmd"
+    [ "$status" -eq 1 ]
+    [ "$output" = "Unknown command: $cmd. Run 'shipit help' for the list." ]
+  done
 }
 
 @test "every command except help needs root" {
   as_user
-  for cmd in setup deploy rollback status logs env backup restore; do
-    run "$shipit" "$cmd" myapp
+  for cmd in setup deploy rollback remote; do
+    run "$shipit" "$cmd" blog
     [ "$status" -eq 1 ]
-    [ "$output" = "Run this as root, or with sudo: sudo shipit $cmd myapp" ] || {
+    [ "$output" = "Run this as root, or with sudo: sudo shipit $cmd blog" ] || {
       echo "$cmd: $output"
       return 1
     }
@@ -56,17 +64,19 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "the root message repeats the arguments" {
   as_user
-  run "$shipit" deploy https://github.com/me/app --ref abc123
-  [ "$output" = "Run this as root, or with sudo: sudo shipit deploy https://github.com/me/app --ref abc123" ]
+  run "$shipit" deploy https://github.com/me/blog blog main
+  [ "$output" = "Run this as root, or with sudo: sudo shipit deploy https://github.com/me/blog blog main" ]
 }
 
-@test "commands without a library yet say they're not implemented" {
+@test "commands not built yet say so and fail" {
   as_root
-  for cmd in setup deploy rollback status logs env backup restore; do
-    [ ! -f "$REPO_ROOT/lib/$cmd.sh" ] || continue
-    run "$shipit" "$cmd"
+  for cmd in setup deploy rollback remote; do
+    run "$shipit" "$cmd" blog
     [ "$status" -eq 1 ]
-    [ "$output" = "shipit $cmd is not implemented yet." ]
+    [ "$output" = "shipit $cmd isn't implemented yet." ] || {
+      echo "$cmd: $output"
+      return 1
+    }
   done
 }
 
@@ -77,8 +87,20 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
   [ "$status" -eq 0 ]
 }
 
-@test "lib/common.sh can be sourced without side effects" {
-  run bash -c 'set -euo pipefail; . "$1/lib/common.sh"; echo "$DEPLOY_USER $SHIPIT_ETC $SHIPIT_VAR"' _ "$REPO_ROOT"
+@test "every library can be sourced without side effects" {
+  local lib
+  for lib in common config setup deploy rollback remote; do
+    run bash -c 'set -euo pipefail; . "$1/lib/common.sh"; . "$1/lib/$2.sh"' _ "$REPO_ROOT" "$lib"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || {
+      echo "$lib: $output"
+      return 1
+    }
+  done
+}
+
+@test "lib/common.sh sets the plan §4 paths, and finds templates/ next to lib/" {
+  run bash -c 'set -euo pipefail; . "$1/lib/common.sh"; echo "$SHIPIT_ETC $SHIPIT_VAR $SRV_ROOT $SHIPIT_TEMPLATES"' _ "$REPO_ROOT"
   [ "$status" -eq 0 ]
-  [ "$output" = "deployer /etc/shipit /var/lib/shipit" ]
+  [ "$output" = "/etc/shipit /var/lib/shipit /srv $REPO_ROOT/lib/../templates" ]
 }
