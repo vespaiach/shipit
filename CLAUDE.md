@@ -19,7 +19,7 @@ manual) and this file in step with the code.
   `lock_release`, `lock_close_all`); `render`.
 - `lib/config.sh` — `check_site_name`, `check_ref`, `check_repo_url`, `repo_slug`, `repo_ssh_url`,
   `in_list`; `shipit.ini`: `ini_load` (one `git config --no-includes -z --list` pass, every key
-  validated by `ini_value_ok`, results in `INI_*`), `ini_check_name`, `ini_check_type`,
+  validated by `ini_value_ok`, results in `INI_*`), `ini_check_type`,
   `ini_check_clash`; site configs: `conf_parse`/`site_conf_read` (data only, into `CONF_*`),
   `site_conf_write` (checked, then one rename), `site_next_port`.
 - `lib/setup.sh` (sources `config.sh`) — plan §5.1. Helpers the tests call: `version_ge`,

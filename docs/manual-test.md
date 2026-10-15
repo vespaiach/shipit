@@ -105,8 +105,8 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
       visibly different page, and deploy it. `/etc/caddy/sites/docs.caddy` names `current/out`, and the
       new page is served. `shipit rollback docs` brings back `current/dist` in the Caddy file and the
       old page.
-- [ ] **Rename refused.** Change `site.name` in a commit. The deploy says "shipit.ini says the site name
-      is …, but this repo is deployed as docs. …", and nothing changes. Revert.
+- [ ] **Old `site.name` refused.** Add `name = docs` under `[site]` in a commit. The deploy says
+      "shipit.ini has unknown keys: site.name. …", and nothing changes. Revert.
 - [ ] **Type change refused.** Change `site.type` to `node` in a commit. The deploy says "… Changing a
       site's type isn't supported." Revert.
 - [ ] **Hand-edited site Caddy file.** Remove the marker line from `/etc/caddy/sites/docs.caddy`, then
@@ -160,7 +160,7 @@ Below, `<rel>` means a release folder name (`ls /srv/<name>/releases`).
 - [ ] **Reboot.** `reboot`. Afterwards `curl -s https://api.test.example.com/` works without any
       command.
 - [ ] **A failed first deploy leaves nothing.** Deploy a second node repo (or `api` under the name
-      `api2` with `site.name = api2`) whose app never answers. It prints "First deploy of api2 failed;
+      `api2`) whose app never answers. It prints "First deploy of api2 failed;
       nothing is served." and:
       - `ls /srv/api2/current /etc/caddy/sites/api2.caddy /etc/systemd/system/shipit-api2.service`
         finds none of them;

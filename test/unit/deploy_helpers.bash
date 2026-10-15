@@ -59,7 +59,7 @@ host() {
   remote=$BATS_TEST_TMPDIR/remote
   git init -q -b main "$remote"
   site_gitconfig url."$remote".insteadOf https://github.com/me/blog
-  commit shipit.ini "$(ini blog blog.example.com)" dist/index.html hello >/dev/null
+  commit shipit.ini "$(ini blog.example.com)" dist/index.html hello >/dev/null
 }
 
 # site_gitconfig <key> <value>: sets a key in the build user's ~/.gitconfig.
@@ -68,11 +68,11 @@ site_gitconfig() {
   git config -f "$SRV_ROOT/blog/home/.gitconfig" "$1" "$2"
 }
 
-# ini <name> <domain> [line]...: a static shipit.ini, serving dist.
+# ini <domain> [line]...: a static shipit.ini, serving dist.
 ini() {
-  local name=$1 domain=$2
-  shift 2
-  printf '[site]\n\tname = %s\n\tdomain = %s\n\ttype = static\n' "$name" "$domain"
+  local domain=$1
+  shift
+  printf '[site]\n\tdomain = %s\n\ttype = static\n' "$domain"
   printf '\t%s\n' "$@"
   printf '[static]\n\troot = dist\n'
 }
@@ -96,7 +96,7 @@ commit() {
 node_ini() {
   local start=$1
   shift
-  printf '[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = node\n'
+  printf '[site]\n\tdomain = blog.example.com\n\ttype = node\n'
   printf '\t%s\n' "$@"
   printf '[node]\n\tstart = %s\n' "$start"
 }

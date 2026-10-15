@@ -4,7 +4,7 @@
 # Needs lib/common.sh (err, check_domain, check_port).
 
 # The keys shipit.ini may contain (plan §3), and those that may repeat.
-INI_KEYS=(site.name site.domain site.alias site.type site.health site.env node.install node.build
+INI_KEYS=(site.domain site.alias site.type site.health site.env node.install node.build
   node.start static.root data.dir)
 INI_MULTI_KEYS=(site.alias site.env data.dir)
 
@@ -78,7 +78,6 @@ in_list() {
 ini_value_ok() {
   local LC_ALL=C key=$1 v=$2
   case "$key" in
-    site.name) check_site_name "$v" ;;
     site.domain | site.alias) check_domain "$v" ;;
     site.type)
       case "$v" in
@@ -126,7 +125,7 @@ ini_value_ok() {
 
 # ini_load <file>: parses and validates a shipit.ini (plan §3) with `git config --no-includes -z
 # --list`; it's never sourced. On success it sets:
-#   INI_NAME INI_DOMAIN INI_TYPE  site.name, site.domain, site.type
+#   INI_DOMAIN INI_TYPE           site.domain, site.type
 #   INI_ALIASES INI_ENV INI_DIRS  arrays: site.alias, site.env, data.dir
 #   INI_HEALTH                    site.health, default /
 #   INI_HEALTH_STRICT             1 if site.health was set (health_ok's strict mode), else empty
@@ -139,7 +138,7 @@ ini_value_ok() {
 ini_load() {
   local LC_ALL=C file=$1 out entry key value k bad=() pairs=() line=''
   local -A count=()
-  INI_NAME='' INI_DOMAIN='' INI_TYPE='' INI_HEALTH='' INI_HEALTH_STRICT=''
+  INI_DOMAIN='' INI_TYPE='' INI_HEALTH='' INI_HEALTH_STRICT=''
   INI_INSTALL='' INI_BUILD='' INI_START='' INI_ROOT=''
   INI_ALIASES=() INI_ENV=() INI_DIRS=()
 
@@ -172,7 +171,7 @@ ini_load() {
     in_list "$key" "${INI_KEYS[@]}" || bad+=("$key")
   done
   if [ "${#bad[@]}" -gt 0 ]; then
-    err "shipit.ini has unknown keys: ${bad[*]}. Use only site.name, site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir."
+    err "shipit.ini has unknown keys: ${bad[*]}. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir."
     return 1
   fi
 
@@ -200,7 +199,6 @@ ini_load() {
       pairs+=("$key=$value")
     fi
     case "$key" in
-      site.name) INI_NAME=$value ;;
       site.domain) INI_DOMAIN=$value ;;
       site.alias) INI_ALIASES+=("$value") ;;
       site.type) INI_TYPE=$value ;;
@@ -214,7 +212,7 @@ ini_load() {
     esac
   done
 
-  for key in site.name site.domain site.type; do
+  for key in site.domain site.type; do
     if [ -z "${count[$key]-}" ]; then
       err "shipit.ini needs $key."
       return 1
@@ -255,18 +253,6 @@ ini_load() {
       ;;
   esac
   [ -n "$INI_HEALTH" ] || INI_HEALTH=/
-}
-
-# ini_check_name <name> <first deploy: yes|no>: site.name must equal the name the site is deployed as
-# (plan §5.2 A.3).
-ini_check_name() {
-  [ "$INI_NAME" = "$1" ] && return 0
-  if [ "$2" = yes ]; then
-    err "shipit.ini says the site name is $INI_NAME, but you asked to deploy it as $1."
-  else
-    err "shipit.ini says the site name is $INI_NAME, but this repo is deployed as $1. Renaming a site isn't supported; change site.name back."
-  fi
-  return 1
 }
 
 # ini_check_type <deployed type>: site.type can't change after the first deploy (decision 15).
