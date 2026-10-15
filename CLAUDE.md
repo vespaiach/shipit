@@ -42,8 +42,12 @@ in step with the code.
   steps `deploy_resolve` (A.1), `deploy_access` (A.2), `deploy_fetch` (A.3), `deploy_build` (B, with
   `deploy_port` for a first node/nextjs deploy and `release_nextjs_cache`, B.3), `deploy_switch`
   (C.1), `deploy_config` (C.2–C.3, with `deploy_revert`, C.4), `deploy_prune` (D), called in order by
-  `cmd_deploy`. `HEALTH_TIMEOUT`, `HEALTH_INTERVAL` and `HEALTH_MAX_TIME` (plain constants there) time
-  the health check.
+  `cmd_deploy`, after `site_lock` (the site lock, shared with rollback). `HEALTH_TIMEOUT`,
+  `HEALTH_INTERVAL` and `HEALTH_MAX_TIME` (plain constants there) time the health check.
+  `lib/rollback.sh` sources `lib/deploy.sh` and reuses its state globals and helpers (`site_lock`,
+  `link_target`, `atomic_link`, `site_apply_config`, `site_restart_and_check`, `deploy_exit`); its own
+  are `rollback_args`, `rollback_links` (previous first, then current, plan decision 60) and
+  `rollback_revert`.
 - `templates/` — what `render` fills in: `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
   `apt-caddy.list`, `apt-nodesource.list`, `apt-nodejs.pref`, `apt-auto-upgrades`, and a site's Caddy
   file in parts: `site-log.caddy` (marker + log snippet), `site-static.caddy` or `site-proxy.caddy`,
@@ -51,8 +55,9 @@ in step with the code.
   `[Unit]`, `[Install]`, `[Service]` last), `site-data.service` (with `data.dir`),
   `site-nextjs.service`. `github_known_hosts` is copied data (GitHub's SSH host keys, used by git's ssh as is).
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
-- `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`), `test/golden/` (expected
-  rendered output), `test/fixtures/`.
+- `test/unit/*.bats` (bats-core, shared set-up in `test/unit/helpers.bash`; the temp-root deploy
+  harness, `deploy_setup`, `host`, `commit` and friends, in `test/unit/deploy_helpers.bash`, shared by
+  `deploy.bats` and `rollback.bats`), `test/golden/` (expected rendered output), `test/fixtures/`.
 - `.github/workflows/check.yml` — CI: runs `make`.
 
 ## Engineering rules
@@ -108,8 +113,9 @@ in step with the code.
 ## Making a change
 
 Milestones M0–M7 are in plan §8. M0 (skeleton, dispatcher, helpers), M1 (`lib/config.sh`), M2
-(`shipit setup`, without `--ci-key`, which comes with M6), M3 (`shipit deploy` for static sites) and
-M4 (node and Next.js deploys, health check, auto-revert) are implemented; M5–M7 are to do.
+(`shipit setup`, without `--ci-key`, which comes with M6), M3 (`shipit deploy` for static sites),
+M4 (node and Next.js deploys, health check, auto-revert) and M5 (`shipit rollback`) are implemented;
+M6–M7 are to do.
 
 1. Branch from `origin/main`.
 2. Change the code and the plan together; add bats tests for everything testable without root.

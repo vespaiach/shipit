@@ -366,7 +366,7 @@ conf() {
   CONF_ALIASES=(www.blog.example.com blog.example.org) CONF_PORT=3001
   site_conf_write blog
   [ "$(stat -c %a "$SHIPIT_ETC/sites/blog.conf" 2>/dev/null || stat -f %Lp "$SHIPIT_ETC/sites/blog.conf")" = 644 ]
-  [ "$(cat "$SHIPIT_ETC/sites/blog.conf")" = "# managed by shipit (shipit deploy writes this file)
+  [ "$(cat "$SHIPIT_ETC/sites/blog.conf")" = "# managed by shipit (shipit deploy and rollback write this file)
 REPO=https://github.com/me/blog
 TYPE=nextjs
 DOMAIN=blog.example.com

@@ -761,6 +761,14 @@ deploy_prune() {
 
 # ---- The command ---------------------------------------------------------------------------------
 
+# site_lock: takes the site lock (held for a whole deploy or rollback) into SITE_LOCK_FD, waiting with
+# one message for both.
+site_lock() {
+  lock_wait "$SHIPIT_VAR/$SITE.lock" "Another deploy or rollback of $SITE is running; waiting." \
+    || die "Couldn't take $SHIPIT_VAR/$SITE.lock."
+  SITE_LOCK_FD=$LOCK_FD
+}
+
 # Deletes a release that was never switched to, and the temp folder.
 deploy_exit() {
   if [ -n "$RELEASE_DIR" ] && [ -z "$SWITCHED" ]; then rm -rf -- "$RELEASE_DIR"; fi
@@ -775,9 +783,7 @@ cmd_deploy() {
   # caddy validates the site's Caddy file from here as the caddy user. Nothing in it is secret.
   chmod 755 "$DEPLOY_TMP"
 
-  lock_wait "$SHIPIT_VAR/$SITE.lock" "Another deploy of $SITE is running; waiting." \
-    || die "Couldn't take $SHIPIT_VAR/$SITE.lock."
-  SITE_LOCK_FD=$LOCK_FD
+  site_lock
   deploy_resolve
   deploy_access
   deploy_fetch

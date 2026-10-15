@@ -70,14 +70,9 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "commands not built yet say so and fail" {
   as_root
-  for cmd in rollback remote; do
-    run "$shipit" "$cmd" blog
-    [ "$status" -eq 1 ]
-    [ "$output" = "shipit $cmd isn't implemented yet." ] || {
-      echo "$cmd: $output"
-      return 1
-    }
-  done
+  run "$shipit" remote blog
+  [ "$status" -eq 1 ]
+  [ "$output" = "shipit remote isn't implemented yet." ]
 }
 
 @test "works through a symlink, as installed" {

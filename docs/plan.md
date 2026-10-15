@@ -319,7 +319,8 @@ the URL matches the registered REPO. The only accepted URL is `https://github.co
 
 Locks: the site lock is taken at the start of A and held through D, so two deploys of the same site
 can't overlap (otherwise one deploy's prune could delete the other's half-built release). A second
-deploy of the same site waits, printing "Another deploy of <name> is running; waiting." The lock order
+deploy of the same site waits, printing "Another deploy or rollback of <name> is running; waiting."
+(rollback takes the same lock and prints the same message, decision 61). The lock order
 is always site lock first, then `build.lock`, so a deploy never holds `build.lock` while waiting for a
 site lock.
 
@@ -402,13 +403,27 @@ D. **Prune**: delete every release that isn't `current` or `previous`, and its `
 
 ### 5.3 `shipit rollback <name>`
 
-Under the site lock: needs a `previous`. Swap `current` and `previous` atomically, re-render the
+Under the site lock (no `build.lock`: nothing is built): needs a `previous`. Swap `current` and
+`previous` atomically, re-render the
 Caddy file and unit from the new `current`'s `shipit.ini` (section 5.5; reload Caddy / `daemon-reload`
 as needed, and TYPE, DOMAIN and ALIASES in `<name>.conf`), restart the unit (Node/Next.js; `nextjs`
 empties its cache as in 5.2 C.3) and health-check it. If validation or the health check fails, swap
 back, re-render and restart, and exit non-zero ("Rollback failed health check; still serving
 <release>."). Rolling back twice returns to where you started. The next deploy drops whichever release
-is then `previous`.
+is then `previous`. Nothing is pruned or deleted: both releases are kept.
+
+- Refused, changing nothing: anything but exactly one valid name ("Usage: shipit rollback <name>"); an
+  unknown site (the message of 5.2 A.1); a site whose first deploy never succeeded (no TYPE: "<name>
+  has never been deployed successfully, so there's nothing to roll back to."); no `previous`, or one
+  that points at `current` or at a missing folder ("<name> has no previous release to roll back
+  to.").
+- The swap is `previous` first, then `current` (decision 60). Success prints "Rolled back <name>: now
+  serving <release>."
+- A failed render or validation (including the domain clash check against the other sites as they
+  are now) says "Rollback failed: the previous release's config couldn't be installed; still serving
+  <release>." instead (as decision 47 does for deploy). Going back always re-renders, restarts and
+  health-checks the original `current`; if that fails too, it's printed and rollback still exits
+  non-zero (decision 58).
 
 Rollback swaps code only, never data (`/var/lib/shipit-<name>` is untouched). Schema changes, e.g.
 SQLite migrations, must stay compatible with the previous release for one version.
@@ -573,7 +588,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M2 | `setup` (incl. SSH hardening, firewall) | bats (golden files for every rendered file) |
 | M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
-| M5 | `rollback` | bats |
+| M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
 | M6 | `remote` + CI user + GitHub Actions example | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten | review |
 
@@ -640,3 +655,5 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 57 | What a failed first deploy keeps | **The users and `<name>.conf` with REPO and PORT**: TYPE, DOMAIN and ALIASES (written in C.2) are removed again, so the rerun is a first deploy (access probe, name check) and the domain isn't held. The unit is stopped, disabled and deleted (then `daemon-reload`), not only stopped and disabled, so no unit is left pointing at a missing `current`. |
 | 58 | Restart after a failed render | **The restored release is restarted and health-checked whatever made the deploy fail**, as C.4 says, even though a failed render never restarted the new one (a short gap). If that fails too, it's printed and the deploy still exits non-zero. |
 | 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. |
+| 60 | Rollback's swap order | **`previous` → old `current` first, then `current` → old `previous`**, as deploy's C.1 orders them. A crash in between leaves `current` and the config rendered from it unchanged (the site keeps serving what it served), with both links on the same release; rollback treats a `previous` equal to `current` as no `previous`. The other order would leave `current` on the older release with the newer release's config until something re-rendered it. Going back after a failure uses the same order. |
+| 61 | Waiting for the site lock | **One message for deploy and rollback: "Another deploy or rollback of <name> is running; waiting."** The waiting command can't know which of the two holds the lock. |
