@@ -463,7 +463,8 @@ make test
 ```
 
 On macOS, install the tools with Homebrew (`/bin/bash` is 3.2; the tests need bash 5):
-`brew install bash bats-core shellcheck shfmt gettext flock`. Tests that need GNU-only tools or root
+`brew install bash bats-core shellcheck shfmt gettext flock parallel` (`make test` runs bats with
+`--jobs 4`, which needs GNU `parallel`). Tests that need GNU-only tools or root
 skip with a reason.
 
 GitHub Actions runs `make` on every push to `main` and every pull request

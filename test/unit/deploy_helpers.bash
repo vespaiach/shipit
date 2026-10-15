@@ -4,6 +4,40 @@
 # its paths in $BATS_TEST_TMPDIR, host commands stubbed, git run for real against a local repo that the
 # build user's ~/.gitconfig puts in place of https://github.com/me/blog.
 
+# deploy_setup_file: call it from setup_file. Writes the host-command stubs once per test file, in
+# $BATS_FILE_TMPDIR/stubs, for every test of the file to share (they're never changed; each test's state
+# is in the paths $STUB_CALLS, $STUB_PASSWD and $STUB_CODES, which host and curl_codes set). A new
+# executable costs macOS ~0.2 s on its first run, which was most of a deploy test.
+deploy_setup_file() {
+  local d=$BATS_FILE_TMPDIR/stubs cmd
+  mkdir -p "$d"
+  for cmd in chown setfacl systemctl caddy systemd-analyze; do
+    printf '#!/usr/bin/env bash\necho "%s $*" >>"$STUB_CALLS"\n' "$cmd" >"$d/$cmd"
+  done
+  printf '#!/usr/bin/env bash\n%s\n' '[ "$1" = passwd ] && grep "^$2:" "$STUB_PASSWD" || exit 2' >"$d/getent"
+  printf '#!/usr/bin/env bash\n%s\n' 'echo "useradd $*" >>"$STUB_CALLS"
+for a; do name=$a; done
+while [ $# -gt 0 ]; do [ "$1" = --comment ] && c=$2; shift; done
+echo "$name:x:999:999:$c:/nonexistent:/usr/sbin/nologin" >>"$STUB_PASSWD"' >"$d/useradd"
+  # runuser runs the command as the current user.
+  printf '#!/usr/bin/env bash\n%s\n' 'echo "runuser $1 $2" >>"$STUB_CALLS"; while [ "$1" != -- ]; do shift; done; shift; exec "$@"' >"$d/runuser"
+  printf '#!/usr/bin/env bash\n%s\n' 'echo "curl $*" >>"$STUB_CALLS"; f=$STUB_CODES
+code=$(head -n 1 "$f")
+if [ "$(wc -l <"$f")" -gt 1 ]; then tail -n +2 "$f" >"$f.t"; cat "$f.t" >"$f"; fi
+printf %s "$code"; [ "$code" != 000 ] || exit 7' >"$d/curl"
+  chmod +x "$d"/*
+}
+
+# shared_stubs: puts the shared stubs on PATH, behind the test's own (so `stub` still overrides them).
+shared_stubs() {
+  [ -x "$BATS_FILE_TMPDIR/stubs/curl" ] || {
+    echo "deploy_setup_file wasn't called from setup_file" >&2
+    return 1
+  }
+  mkdir -p "$BATS_TEST_TMPDIR/stubs"
+  PATH=$BATS_TEST_TMPDIR/stubs:$BATS_FILE_TMPDIR/stubs:$PATH
+}
+
 # deploy_setup: sources lib/common.sh and lib/deploy.sh and points their paths at the temp dir. stdin is
 # /dev/null, as without a terminal, so a first deploy never waits for answers; a test that wants to
 # answer the prompts redirects the command's stdin itself.
@@ -22,20 +56,18 @@ deploy_setup() {
 
 need_envsubst() { command -v envsubst >/dev/null || skip "envsubst (gettext-base) isn't installed"; }
 
-# curl_codes <code>...: a curl stub answering the codes in turn (the last one from then on), logging
-# its arguments to $calls. 000 exits 7, as curl does when nothing answers.
+# curl_codes <code>...: makes the shared curl stub answer the codes in turn (the last one from then on),
+# logging its arguments to $calls. 000 exits 7, as curl does when nothing answers.
 curl_codes() {
+  shared_stubs
   calls=${calls:-$BATS_TEST_TMPDIR/calls}
-  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/codes"
-  stub curl 'echo "curl $*" >>"'"$calls"'"; f="'"$BATS_TEST_TMPDIR"'/codes"
-    code=$(head -n 1 "$f")
-    if [ "$(wc -l <"$f")" -gt 1 ]; then tail -n +2 "$f" >"$f.t"; cat "$f.t" >"$f"; fi
-    printf %s "$code"; [ "$code" != 000 ] || exit 7'
+  export STUB_CALLS=$calls STUB_CODES=$BATS_TEST_TMPDIR/codes
+  printf '%s\n' "$@" >"$STUB_CODES"
 }
 
-# host: stubs the host commands (each appends its arguments to $calls), keeps a fake passwd that
-# useradd writes and getent reads, writes the site's shipit.ini (put_ini), and makes a local repo
-# ($remote) that https://github.com/me/blog points at for the build user's git.
+# host: uses the shared stubs for the host commands (each appends its arguments to $calls), keeps a
+# fake passwd that useradd writes and getent reads, writes the site's shipit.ini (put_ini), and makes
+# a local repo ($remote) that https://github.com/me/blog points at for the build user's git.
 host() {
   command -v flock >/dev/null || skip "flock (util-linux) isn't installed"
   command -v jq >/dev/null || skip "jq isn't installed"
@@ -44,20 +76,11 @@ host() {
   calls=$BATS_TEST_TMPDIR/calls passwd=$BATS_TEST_TMPDIR/passwd
   : >"$calls"
   : >"$passwd"
-  local cmd
-  for cmd in chown setfacl systemctl caddy systemd-analyze; do
-    stub "$cmd" 'echo "'"$cmd"' $*" >>"'"$calls"'"'
-  done
+  shared_stubs
+  export STUB_PASSWD=$passwd
   # The health check answers 200 (curl_codes changes that), at once: one try, no waiting.
   curl_codes 200
   HEALTH_TIMEOUT=0 HEALTH_INTERVAL=0
-  stub getent '[ "$1" = passwd ] && grep "^$2:" "'"$passwd"'" || exit 2'
-  stub useradd 'echo "useradd $*" >>"'"$calls"'"
-    for a; do name=$a; done
-    while [ $# -gt 0 ]; do [ "$1" = --comment ] && c=$2; shift; done
-    echo "$name:x:999:999:$c:/nonexistent:/usr/sbin/nologin" >>"'"$passwd"'"'
-  # runuser runs the command as the current user.
-  stub runuser 'echo "runuser $1 $2" >>"'"$calls"'"; while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
   BUILD_PATH=$BATS_TEST_TMPDIR/stubs:$PATH
   remote=$BATS_TEST_TMPDIR/remote
   git init -q -b main "$remote"

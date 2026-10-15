@@ -7,6 +7,11 @@
 
 bats_require_minimum_version 1.5.0
 
+setup_file() {
+  load deploy_helpers
+  deploy_setup_file
+}
+
 setup() {
   load helpers
   load deploy_helpers
@@ -601,19 +606,7 @@ EOF
   [ ! -s "$calls" ]
 }
 
-@test "a changed site.type is refused on a later deploy" {
-  host
-  run cmd_deploy https://github.com/me/blog blog
-  [ "$status" -eq 0 ]
-  rel=$(current)
-  put_ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs'
-  run cmd_deploy blog
-  [ "$status" -eq 1 ]
-  [ "${lines[-1]}" = "shipit.ini says the site type is nextjs, but this site is deployed as static. Changing a site's type isn't supported." ]
-  [ "$(current)" = "$rel" ]
-}
-
-@test "a domain or alias clash with another site is refused on a later deploy" {
+@test "a changed site.type, or a domain or alias clash with another site, is refused on a later deploy" {
   host
   printf 'REPO=https://github.com/me/other\nTYPE=static\nDOMAIN=other.example.com\nALIASES=www.other.example.com\n' \
     >"$SHIPIT_ETC/sites/other.conf"
@@ -628,12 +621,21 @@ EOF
     [ "$(current)" = "$rel" ]
     [ "$(releases)" = "${rel#releases/}" ]
   done
+  # A changed type is refused too (deploy_fetch calls ini_check_type).
+  put_ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs'
+  run cmd_deploy blog
+  [ "$status" -eq 1 ]
+  [ "${lines[-1]}" = "shipit.ini says the site type is nextjs, but this site is deployed as static. Changing a site's type isn't supported." ]
+  [ "$(current)" = "$rel" ]
   grep -qx 'DOMAIN=blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
   run ! grep -q ALIASES "$SHIPIT_ETC/sites/blog.conf"
 }
 
-@test "first deploy of a node site: port, unit, daemon-reload, enable, restart, health check, Caddy file" {
+@test "first deploy of a node site: lowest free port, unit, daemon-reload, enable, restart, health check, Caddy file; later deploys keep the port" {
   host
+  # a and b leave a gap: blog takes the lowest free port, 3001. (The goldens render port 3000.)
+  printf 'REPO=https://github.com/me/a\nTYPE=node\nDOMAIN=a.example.com\nPORT=3000\n' >"$SHIPIT_ETC/sites/a.conf"
+  printf 'REPO=https://github.com/me/b\nPORT=3002\n' >"$SHIPIT_ETC/sites/b.conf" # b's first deploy is under way
   put_ini "$(node_ini 'node server.js')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
@@ -642,17 +644,17 @@ EOF
   }
   rel=$(releases)
   [ "${lines[-1]}" = "Deployed blog: now serving $rel." ]
-  [[ $output == *"Gave blog the port 3000."* ]]
+  [[ $output == *"Gave blog the port 3001."* ]]
   [ "$(current)" = "releases/$rel" ]
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
 # managed by shipit (shipit deploy writes this file)
 REPO=https://github.com/me/blog
 TYPE=node
 DOMAIN=blog.example.com
-PORT=3000
+PORT=3001
 EOF
-  diff <(unit) "$golden/site-node.service"
-  diff <(caddy_file) "$golden/site-proxy.caddy"
+  diff <(unit) <(sed s/3000/3001/g "$golden/site-node.service")
+  diff <(caddy_file) <(sed s/3000/3001/g "$golden/site-proxy.caddy")
   grep -qx "systemd-analyze verify .*/unit/shipit-blog.service" "$calls"
   # In order: install the unit, reload systemd, enable, reload Caddy, restart, health check.
   diff <(grep -E '^(systemctl|curl)' "$calls") - <<'EOF'
@@ -660,21 +662,12 @@ systemctl daemon-reload
 systemctl enable --quiet shipit-blog
 systemctl reload caddy
 systemctl restart shipit-blog
-curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/
+curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3001/
 EOF
   # No setfacl for Caddy: it proxies, and never reads the release.
   run ! grep -q setfacl "$calls"
   [ -n "$(find "$SYSTEMD_DIR/shipit-blog.service" -perm 644)" ]
-}
-
-@test "a node site's first deploy takes the lowest free port, and later deploys keep it" {
-  host
-  printf 'REPO=https://github.com/me/a\nTYPE=node\nDOMAIN=a.example.com\nPORT=3000\n' >"$SHIPIT_ETC/sites/a.conf"
-  printf 'REPO=https://github.com/me/b\nPORT=3002\n' >"$SHIPIT_ETC/sites/b.conf" # b's first deploy is under way
-  put_ini "$(node_ini 'node server.js')"
-  run cmd_deploy https://github.com/me/blog blog
-  [ "$status" -eq 0 ]
-  grep -qx PORT=3001 "$SHIPIT_ETC/sites/blog.conf"
+  # A later deploy keeps the port, even once a's 3000 is free.
   rm "$SHIPIT_ETC/sites/a.conf"
   run cmd_deploy blog
   [ "$status" -eq 0 ]

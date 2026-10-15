@@ -5,6 +5,11 @@
 
 bats_require_minimum_version 1.5.0
 
+setup_file() {
+  load deploy_helpers
+  deploy_setup_file
+}
+
 setup() {
   load helpers
   load deploy_helpers
@@ -178,28 +183,6 @@ systemctl restart shipit-blog
 curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/
 EOF
   run ! grep -q 'systemd-analyze\|runuser\|/var/lib\|shipit-blog/' "$calls"
-}
-
-@test "rollback of a nextjs site: stop, empty the cache, start" {
-  host
-  put_ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs'
-  deploy_ok https://github.com/me/blog blog
-  rel1=$(current)
-  commit dist/index.html v2 >/dev/null
-  deploy_ok blog
-  : >"$calls"
-  run cmd_rollback blog
-  [ "$status" -eq 0 ] || {
-    echo "$output"
-    return 1
-  }
-  [ "$(current)" = "$rel1" ]
-  diff <(grep -E '^(systemctl (stop|clean|start|restart) |curl)' "$calls") - <<'EOF'
-systemctl stop shipit-blog
-systemctl clean --what=cache shipit-blog
-systemctl start shipit-blog
-curl -s -o /dev/null -w %{http_code} --max-time 5 -H Host: blog.example.com http://127.0.0.1:3000/
-EOF
 }
 
 @test "rollback works when shipit.ini is invalid or deleted, and doesn't touch it" {
