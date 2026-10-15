@@ -1,5 +1,5 @@
 # Runs `make` (lint and the bats unit tests) on every push to main and every pull request (plan §7).
-# Tests that need root still skip here; the e2e scenarios run in an Incus VM by hand.
+# Tests that need root skip here.
 name: check
 
 on:
@@ -27,7 +27,7 @@ jobs:
           curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
             | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
           sudo apt-get update
-          sudo apt-get install -y bats caddy gettext-base jq logrotate nftables openssh-server sudo
+          sudo apt-get install -y bats caddy gettext-base jq
           sudo curl -fsSL -o /usr/local/bin/shfmt \
             "https://github.com/mvdan/sh/releases/download/$SHFMT_VERSION/shfmt_${SHFMT_VERSION}_linux_amd64"
           sudo chmod +x /usr/local/bin/shfmt

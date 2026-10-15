@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # shellcheck disable=SC2016,SC2034 # stub bodies are single-quoted on purpose; tests set lib variables
-# render() (plan §1): substitutes only the listed variables, and fails on an unset or empty one.
+# render() (plan §6): substitutes only the listed variables, and fails on an unset or empty one.
 
 bats_require_minimum_version 1.5.0
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs shipit from this checkout: copies bin/ lib/ libexec/ templates/ to /usr/local/lib/shipit
+# Installs shipit from this checkout: copies bin/ lib/ templates/ (if present) to /usr/local/lib/shipit
 # and links /usr/local/bin/shipit. Re-running it replaces the installed copy. Run as root.
 set -euo pipefail
 
@@ -14,7 +14,7 @@ fi
 # Build the new copy next to the old one, then swap, so a failed copy leaves the old install working.
 rm -rf "$dest.new" "$dest.old"
 mkdir -p "$dest.new"
-for dir in bin lib libexec templates; do
+for dir in bin lib templates; do
   [ ! -d "$src/$dir" ] || cp -R "$src/$dir" "$dest.new/"
 done
 chown -R root:root "$dest.new"

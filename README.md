@@ -1,7 +1,7 @@
 # shipit
 
-> **Status:** v2 is being rebuilt from [docs/plan.md](docs/plan.md), which is the spec. Until it lands,
-> the code in this repo is still v1.
+> **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
+> milestone at a time; M0 (skeleton) is done, the commands aren't implemented yet.
 
 ## 1. What it is
 
@@ -18,7 +18,7 @@ No prompts, so every command works over SSH from a laptop or from GitHub Actions
 
 ```bash
 # once per VPS
-ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v2.0.0.tar.gz | tar -xz && cd shipit-2.0.0 && ./install.sh'
+ssh root@vps 'curl -fsSL https://github.com/<you>/shipit/archive/refs/tags/v1.0.0.tar.gz | tar -xz && cd shipit-1.0.0 && ./install.sh'
 ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub
 
 # first deploy of a site, by hand

@@ -1,6 +1,0 @@
-# managed by shipit — one site per file in /etc/caddy/sites
-{
-	email owner@example.com
-}
-
-import /etc/caddy/sites/*.caddy
