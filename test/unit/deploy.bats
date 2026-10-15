@@ -406,21 +406,11 @@ EOF
   [ -z "$output" ]
 }
 
-@test "prune_refs unpins SHAs no kept release has, and keeps a SHA shared with one" {
-  b=20261002T000000Z-2222222222222222222222222222222222222222
-  d=20261004T000000Z-1111111111111111111111111111111111111111
-  pinned=$'refs/shipit/1111111111111111111111111111111111111111\nrefs/shipit/2222222222222222222222222222222222222222\nrefs/shipit/3333333333333333333333333333333333333333\nrefs/shipit/bad'
-  run prune_refs "$d" "$b" <<<"$pinned"
-  [ "$output" = refs/shipit/3333333333333333333333333333333333333333 ]
-  run prune_refs "$d" <<<"$pinned"
-  [ "$output" = $'refs/shipit/2222222222222222222222222222222222222222\nrefs/shipit/3333333333333333333333333333333333333333' ]
-}
-
 # ---- Health check and restart --------------------------------------------------------------------
 
-# health_values: what site_health_check reads; it polls without waiting, for up to 5 s.
+# health_values: what site_health_check reads (the site's conf); it polls without waiting, for up to 5 s.
 health_values() {
-  SITE=blog CONF_PORT=3000 INI_DOMAIN=blog.example.com INI_HEALTH=/ INI_HEALTH_STRICT=''
+  SITE=blog CONF_PORT=3000 CONF_DOMAIN=blog.example.com CONF_TYPE=node
   HEALTH_TIMEOUT=5 HEALTH_INTERVAL=0
   calls=$BATS_TEST_TMPDIR/calls
   : >"$calls"
@@ -447,36 +437,33 @@ health_values() {
   [ "$(grep -c . "$calls")" -gt 1 ]
 }
 
-@test "site_health_check: a redirect passes by default, but site.health needs exactly 200" {
+@test "site_health_check: a redirect passes, and no answer fails" {
   health_values
   HEALTH_TIMEOUT=0
   curl_codes 302
   run site_health_check
   [ "$status" -eq 0 ]
-  INI_HEALTH=/api/health INI_HEALTH_STRICT=1
-  run --separate-stderr site_health_check
-  [ "$status" -eq 1 ]
-  [ "$stderr" = 'http://127.0.0.1:3000/api/health (Host: blog.example.com) answered 302 within 0 s; it needs 200. Check: journalctl -u shipit-blog' ]
   curl_codes 000
   run --separate-stderr site_health_check
-  [[ $stderr == 'http://127.0.0.1:3000/api/health (Host: blog.example.com) gave no answer within 0 s;'* ]]
+  [ "$status" -eq 1 ]
+  [[ $stderr == 'http://127.0.0.1:3000/ (Host: blog.example.com) gave no answer within 0 s; it needs a status below 500.'* ]]
 }
 
 @test "site_restart_and_check: node restarts; nextjs stops, empties its cache and starts; static does nothing" {
   health_values
   curl_codes 200
   stub systemctl 'echo "systemctl $*" >>"'"$calls"'"'
-  INI_TYPE=node
+  CONF_TYPE=node
   run site_restart_and_check
   [ "$status" -eq 0 ]
   diff <(grep -v '^curl' "$calls") - <<<'systemctl restart shipit-blog'
   : >"$calls"
-  INI_TYPE=nextjs
+  CONF_TYPE=nextjs
   run site_restart_and_check
   [ "$status" -eq 0 ]
   diff <(grep -v '^curl' "$calls") - <<<$'systemctl stop shipit-blog\nsystemctl clean --what=cache shipit-blog\nsystemctl start shipit-blog'
   : >"$calls"
-  INI_TYPE=static
+  CONF_TYPE=static
   run site_restart_and_check
   [ "$status" -eq 0 ]
   [ ! -s "$calls" ]
@@ -486,7 +473,7 @@ health_values() {
   health_values
   curl_codes 200
   stub systemctl 'echo "systemctl $*" >>"'"$calls"'"; [ "$1" != clean ]'
-  INI_TYPE=nextjs
+  CONF_TYPE=nextjs
   run --separate-stderr site_restart_and_check
   [ "$status" -eq 1 ]
   [ "$stderr" = 'Restarting shipit-blog failed. Check: journalctl -u shipit-blog' ]
@@ -511,10 +498,9 @@ health_values() {
   [ "$(current)" = "releases/$rel" ]
   [ ! -e "$SRV_ROOT/blog/previous" ]
   [ "$(cat "$SRV_ROOT/blog/current/dist/index.html")" = hello ]
-  [ "$(pins)" = "refs/shipit/$sha" ]
 
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy and rollback write this file)
+# managed by shipit (shipit deploy writes this file)
 REPO=https://github.com/me/blog
 TYPE=static
 DOMAIN=blog.example.com
@@ -527,7 +513,8 @@ EOF
     "useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment shipit site blog blog" \
     "useradd --system --gid blog --no-create-home --home-dir $SRV_ROOT/blog/home --shell /usr/sbin/nologin --comment shipit build blog blog-build" \
     "chown -- root:blog $SRV_ROOT/blog" "chown -- root:blog $SRV_ROOT/blog/releases" \
-    "chown -- blog-build:blog $SRV_ROOT/blog/repo.git" "chown -- caddy:caddy $LOG_ROOT/blog" \
+    "chown -- blog-build:blog $SRV_ROOT/blog/repo.git" "chown -- root:root $SRV_ROOT/blog/config" \
+    "chown -- caddy:caddy $LOG_ROOT/blog" \
     "chown -- blog-build:blog $SRV_ROOT/blog/releases/$rel" "chown -R -- root:blog $SRV_ROOT/blog/releases/$rel" \
     "setfacl -m u:caddy:x -- $SRV_ROOT/blog $SRV_ROOT/blog/releases $SRV_ROOT/blog/releases/$rel" \
     "setfacl -R -P -m u:caddy:rX -- $SRV_ROOT/blog/releases/$rel/dist" \
@@ -544,7 +531,7 @@ EOF
     "$(grep -n -- "setfacl -R" "$calls" | cut -d: -f1)" ]
   [ -d "$LOG_ROOT/blog" ]
   for d in "$SRV_ROOT/blog:2750" "$SRV_ROOT/blog/releases:2750" "$SRV_ROOT/blog/repo.git:700" \
-    "$SRV_ROOT/blog/.ssh:700" "$SRV_ROOT/blog/home:700" "$LOG_ROOT/blog:750" \
+    "$SRV_ROOT/blog/.ssh:700" "$SRV_ROOT/blog/home:700" "$SRV_ROOT/blog/config:700" "$LOG_ROOT/blog:750" \
     "$SRV_ROOT/blog/releases/$rel:2750"; do
     [ -n "$(find "${d%:*}" -maxdepth 0 -perm "${d##*:}")" ] || {
       echo "mode of $d"
@@ -553,20 +540,18 @@ EOF
   done
 }
 
-@test "later deploys: previous follows, two releases kept, pins of deleted releases dropped" {
+@test "later deploys: previous follows, two releases kept" {
   host
-  sha1=$(git -C "$remote" rev-parse HEAD)
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ]
   rel1=$(current)
 
-  # The same commit again: a second release with the same SHA; one pin.
+  # The same commit again: a second release with the same SHA.
   run cmd_deploy blog
   [ "$status" -eq 0 ]
   rel2=$(current)
   [ "$rel2" != "$rel1" ]
   [ "$(previous)" = "$rel1" ]
-  [ "$(pins)" = "refs/shipit/$sha1" ]
 
   sha2=$(commit dist/index.html v2)
   run cmd_deploy blog main
@@ -575,14 +560,11 @@ EOF
   [ "$(cat "$SRV_ROOT/blog/current/dist/index.html")" = v2 ]
   [ "$(releases | wc -l | tr -d ' ')" -eq 2 ]
   [ ! -e "$SRV_ROOT/blog/$rel1" ]
-  # rel1 is gone, but previous (rel2) has its SHA, so the pin stays.
-  [ "$(pins | sort)" = "$(printf 'refs/shipit/%s\n' "$sha1" "$sha2" | sort)" ]
   rel3=$(current)
 
   run cmd_deploy blog "$sha2"
   [ "$status" -eq 0 ]
   [ "$(previous)" = "$rel3" ]
-  [ "$(pins)" = "refs/shipit/$sha2" ]
   [ "$(releases | wc -l | tr -d ' ')" -eq 2 ]
   # The Caddy file didn't change, so Caddy was reloaded once, by the first deploy.
   [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 1 ]
@@ -632,7 +614,7 @@ EOF
   [ "$status" -eq 0 ]
   rel=$(current)
   for line in 'alias = www.other.example.com' 'alias = other.example.com'; do
-    commit shipit.ini "$(ini blog.example.com "$line")" >/dev/null
+    put_ini "$(ini blog.example.com "$line")"
     run cmd_deploy blog
     [ "$status" -eq 1 ]
     [[ ${lines[-1]} == "The hostname "*" is already used by the site other. Remove it from shipit.ini or from other." ]]
@@ -640,7 +622,7 @@ EOF
     [ "$(releases)" = "${rel#releases/}" ]
   done
   # A changed type is refused too (deploy_fetch calls ini_check_type).
-  commit shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+  put_ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs'
   run cmd_deploy blog
   [ "$status" -eq 1 ]
   [ "${lines[-1]}" = "shipit.ini says the site type is nextjs, but this site is deployed as static. Changing a site's type isn't supported." ]
@@ -654,7 +636,7 @@ EOF
   # a and b leave a gap: blog takes the lowest free port, 3001. (The goldens render port 3000.)
   printf 'REPO=https://github.com/me/a\nTYPE=node\nDOMAIN=a.example.com\nPORT=3000\n' >"$SHIPIT_ETC/sites/a.conf"
   printf 'REPO=https://github.com/me/b\nPORT=3002\n' >"$SHIPIT_ETC/sites/b.conf" # b's first deploy is under way
-  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  put_ini "$(node_ini 'node server.js')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -665,7 +647,7 @@ EOF
   [[ $output == *"Gave blog the port 3001."* ]]
   [ "$(current)" = "releases/$rel" ]
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy and rollback write this file)
+# managed by shipit (shipit deploy writes this file)
 REPO=https://github.com/me/blog
 TYPE=node
 DOMAIN=blog.example.com
@@ -696,8 +678,8 @@ EOF
 @test "first deploy of a nextjs site: .next/cache links to the cache folder; stop, clean, start" {
   host
   stub npm '[ "$1" = run ] || exit 0; mkdir -p .next/cache && echo old >.next/cache/f'
-  commit package.json '{"scripts": {"build": "next build"}}' \
-    shipit.ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs' >/dev/null
+  put_ini $'[site]\n\tdomain = blog.example.com\n\ttype = nextjs'
+  commit package.json '{"scripts": {"build": "next build"}}' >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -714,10 +696,10 @@ EOF
 
 @test "a node site's data folders: only the unit changes, so systemd reloads and Caddy doesn't" {
   host
-  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  put_ini "$(node_ini 'node server.js')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ]
-  commit shipit.ini "$(node_ini 'node server.js')"$'\n[data]\n\tdir = uploads\n\tdir = db' >/dev/null
+  put_ini "$(node_ini 'node server.js')"$'\n[data]\n\tdir = uploads\n\tdir = db'
   : >"$calls"
   run cmd_deploy blog
   [ "$status" -eq 0 ]
@@ -729,7 +711,7 @@ EOF
   run ! grep -q 'shipit-blog/\|/var/lib' "$calls"
 
   # An alias changes only the Caddy file.
-  commit shipit.ini "$(node_ini 'node server.js' 'alias = www.blog.example.com')"$'\n[data]\n\tdir = uploads\n\tdir = db' >/dev/null
+  put_ini "$(node_ini 'node server.js' 'alias = www.blog.example.com')"$'\n[data]\n\tdir = uploads\n\tdir = db'
   : >"$calls"
   run cmd_deploy blog
   [ "$status" -eq 0 ]
@@ -738,16 +720,16 @@ EOF
   grep -qx 'systemctl restart shipit-blog' "$calls"
 }
 
-@test "a failed health check reverts a later deploy: links, unit and Caddy file back, release deleted" {
+@test "a failed health check reverts a later deploy's code; its new config stays installed, shipit.ini untouched" {
   host
-  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  put_ini "$(node_ini 'node server.js')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ]
   run cmd_deploy blog
   [ "$status" -eq 0 ]
   old_current=$(current) old_previous=$(previous)
-  old_unit=$(unit) old_caddy=$(caddy_file)
-  commit shipit.ini "$(node_ini 'node other.js' 'alias = www.blog.example.com')" >/dev/null
+  new_ini=$(node_ini 'node other.js' 'alias = www.blog.example.com')
+  put_ini "$new_ini"
   # The new release answers 500; once reverted, the old one answers 200.
   curl_codes 500 200
   : >"$calls"
@@ -758,19 +740,21 @@ EOF
   [ "$(current)" = "$old_current" ]
   [ "$(previous)" = "$old_previous" ]
   [ "$(releases | sort)" = "$(printf '%s\n' "${old_current#releases/}" "${old_previous#releases/}" | sort)" ]
-  [ "$(unit)" = "$old_unit" ]
-  [ "$(caddy_file)" = "$old_caddy" ]
-  run ! grep -q ALIASES "$SHIPIT_ETC/sites/blog.conf"
-  # The new unit and Caddy file went in, then the old ones again; each start was health-checked.
-  [ "$(grep -c 'systemctl daemon-reload' "$calls")" -eq 2 ]
-  [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 2 ]
+  # The config isn't reverted: the new unit and Caddy file are still in, and so is the conf.
+  [[ $(unit) == *'node other.js'* ]]
+  grep -q 'redir https' <(caddy_file)
+  grep -qx 'ALIASES=www.blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
+  [ "$(cat "$SRV_ROOT/blog/config/shipit.ini")" = "$new_ini" ]
+  # The new config went in once; the old code was restarted and health-checked again.
+  [ "$(grep -c 'systemctl daemon-reload' "$calls")" -eq 1 ]
+  [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 1 ]
   [ "$(grep -c 'systemctl restart shipit-blog' "$calls")" -eq 2 ]
   [ "$(grep -c '^curl' "$calls")" -eq 2 ]
 }
 
 @test "a failed first deploy of a node site stops, disables and removes the unit; a rerun can succeed" {
   host
-  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  put_ini "$(node_ini 'node server.js')"
   curl_codes 000 200
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
@@ -786,11 +770,13 @@ EOF
   [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 2 ]
   # The users and the conf (REPO and the port) are kept.
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy and rollback write this file)
+# managed by shipit (shipit deploy writes this file)
 REPO=https://github.com/me/blog
 PORT=3000
 EOF
   [ "$(wc -l <"$passwd" | tr -d ' ')" -eq 2 ]
+  # shipit.ini stays, so the rerun doesn't ask for it again.
+  [ "$(cat "$SRV_ROOT/blog/config/shipit.ini")" = "$(node_ini 'node server.js')" ]
 
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
@@ -803,7 +789,7 @@ EOF
 
 @test "a unit file shipit didn't write is refused, and the deploy reverts" {
   host
-  commit shipit.ini "$(node_ini 'node server.js')" >/dev/null
+  put_ini "$(node_ini 'node server.js')"
   echo '[Service]' >"$SYSTEMD_DIR/shipit-blog.service"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
@@ -849,7 +835,7 @@ EOF
     if [ "$1 $2" = "run build" ]; then mkdir -p dist && echo "built with $SECRET" >dist/index.html; fi'
   commit package.json '{"scripts": {"build": "vite build"}}' package-lock.json '{}' dist/index.html src >/dev/null
   printf '# secrets\nSECRET="s3cr3t value"\nOTHER=1\n' >"$SHIPIT_ETC/sites/blog.env"
-  commit shipit.ini "$(ini blog.example.com 'env = SECRET' 'env = OTHER')" >/dev/null
+  put_ini "$(ini blog.example.com 'env = SECRET' 'env = OTHER')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -866,8 +852,8 @@ EOF
 @test "node.install and node.build from shipit.ini override the defaults" {
   host
   stub make 'echo "make $*" >>"'"$calls"'"'
-  commit package.json '{"scripts": {"build": "x"}}' \
-    shipit.ini "$(printf '%s\n[node]\n\tinstall = make deps\n\tbuild = make site' "$(ini blog.example.com)")" >/dev/null
+  put_ini "$(printf '%s\n[node]\n\tinstall = make deps\n\tbuild = make site' "$(ini blog.example.com)")"
+  commit package.json '{"scripts": {"build": "x"}}' >/dev/null
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ] || {
     echo "$output"
@@ -879,7 +865,7 @@ EOF
 @test "missing site.env keys are named, before anything is built" {
   host
   printf 'A=1\n' >"$SHIPIT_ETC/sites/blog.env"
-  commit shipit.ini "$(ini blog.example.com 'env = A' 'env = B' 'env = C')" >/dev/null
+  put_ini "$(ini blog.example.com 'env = A' 'env = B' 'env = C')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
   [ "${lines[-1]}" = "$SHIPIT_ETC/sites/blog.env is missing B, C, which site.env in shipit.ini needs. Add them as KEY=value lines, then run the deploy again." ]
@@ -933,7 +919,7 @@ EOF
 
 @test "a release without its static.root is refused" {
   host
-  commit shipit.ini "$(ini blog.example.com | sed 's/root = dist/root = out/')" >/dev/null
+  put_ini "$(ini blog.example.com | sed 's/root = dist/root = out/')"
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 1 ]
   [[ $output == *"The release has no folder out (static.root in shipit.ini)"* ]]
@@ -984,7 +970,7 @@ EOF
   old_current=$(current) old_previous=$(previous)
   # caddy refuses any config with the new domain.
   stub caddy 'echo "caddy $*" >>"'"$calls"'"; ! grep -q new.example.com "$3" || { echo "Error: bad" >&2; exit 1; }'
-  commit shipit.ini "$(ini new.example.com)" >/dev/null
+  put_ini "$(ini new.example.com)"
   : >"$calls"
   run cmd_deploy blog
   [ "$status" -eq 1 ]
@@ -1016,6 +1002,236 @@ EOF
   run cmd_deploy https://github.com/me/blog blog
   [ "$status" -eq 0 ]
   [ -e "$CADDY_ETC/sites/blog.caddy" ]
+}
+
+# ---- shipit.ini on the server (plan §5.2 A.2b) ---------------------------------------------------
+
+# no_ini: a site that has no shipit.ini yet.
+no_ini() { rm "$SRV_ROOT/blog/config/shipit.ini"; }
+
+@test "first deploy: piped answers are saved as config/shipit.ini (mode 600), and the site deploys" {
+  host
+  no_ini
+  run cmd_deploy https://github.com/me/blog blog <<<$'blog.example.com\nstatic\ndist'
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [[ $output == *'Domain (for example blog.example.com):'* ]]
+  [[ $output == *"Saved $SRV_ROOT/blog/config/shipit.ini. Edit it to add aliases, site.env or node.install; the next deploy applies them."* ]]
+  [ -n "$(find "$SRV_ROOT/blog/config/shipit.ini" -perm 600)" ]
+  [ "$(git config -f "$SRV_ROOT/blog/config/shipit.ini" --list)" = 'site.domain=blog.example.com
+site.type=static
+static.root=dist' ]
+  [ "$(cat "$SRV_ROOT/blog/current/dist/index.html")" = hello ]
+  grep -qx 'DOMAIN=blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
+}
+
+@test "first deploy of a node site: build, start and a data folder are asked, a blank build is left out" {
+  host
+  no_ini
+  run cmd_deploy https://github.com/me/blog blog <<<$'blog.example.com\nnode\n\nnode server.js\nuploads\n'
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [ "$(git config -f "$SRV_ROOT/blog/config/shipit.ini" --list)" = 'site.domain=blog.example.com
+site.type=node
+node.start=node server.js
+data.dir=uploads' ]
+  grep -q 'node server.js' <(unit)
+  grep -qx 'StateDirectory=shipit-blog shipit-blog/uploads' <(unit)
+  grep -qx PORT=3000 "$SHIPIT_ETC/sites/blog.conf"
+}
+
+@test "first deploy without input refuses with the no-terminal message; users and conf stay, and a rerun can succeed" {
+  host
+  no_ini
+  run cmd_deploy https://github.com/me/blog blog </dev/null
+  [ "$status" -eq 1 ]
+  [ "${lines[-1]}" = "There's no $SRV_ROOT/blog/config/shipit.ini and nothing to ask. Run the deploy in a terminal (ssh -t), or write the file by hand (the keys are in the README), then run the same command again." ]
+  [ ! -e "$SRV_ROOT/blog/config/shipit.ini" ]
+  [ -z "$(releases)" ]
+  [ "$(wc -l <"$passwd" | tr -d ' ')" -eq 2 ]
+  grep -qx 'REPO=https://github.com/me/blog' "$SHIPIT_ETC/sites/blog.conf"
+  run ! grep -q '^TYPE=' "$SHIPIT_ETC/sites/blog.conf"
+  put_ini "$(ini blog.example.com)"
+  run cmd_deploy https://github.com/me/blog blog </dev/null
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [ "$(grep -c useradd "$calls")" -eq 2 ]
+}
+
+@test "an existing shipit.ini is used without reading stdin" {
+  host
+  printf 'A=1\n' >"$SHIPIT_ETC/sites/blog.env"
+  ini_before=$(cat "$SRV_ROOT/blog/config/shipit.ini")
+  run cmd_deploy https://github.com/me/blog blog <<<$'other.example.com\nnode\n'
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [[ $output != *'Domain (for example'* && $output != *'KEY=VALUE (/q'* ]]
+  [ "$(cat "$SRV_ROOT/blog/config/shipit.ini")" = "$ini_before" ]
+  grep -qx 'DOMAIN=blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
+  [ "$(cat "$SHIPIT_ETC/sites/blog.env")" = A=1 ]
+}
+
+@test "a deployed site whose shipit.ini is gone is refused, with no prompt" {
+  host
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  rel=$(current)
+  no_ini
+  run cmd_deploy blog <<<$'blog.example.com\nstatic\ndist'
+  [ "$status" -eq 1 ]
+  [ "$output" = "$SRV_ROOT/blog/config/shipit.ini is missing, and blog was deployed before, so shipit won't guess its settings. Put the file back (the keys are in the README), then run the deploy again." ]
+  [ "$(current)" = "$rel" ]
+  [ ! -e "$SRV_ROOT/blog/config/shipit.ini" ]
+}
+
+@test "a later deploy picks up an edited shipit.ini and says what it wrote" {
+  host
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  # Nothing changed: no Caddy reload.
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  [[ $output != *'and reloaded Caddy'* ]]
+  put_ini "$(ini blog.example.com 'alias = www.blog.example.com')"
+  : >"$calls"
+  run cmd_deploy blog
+  [ "$status" -eq 0 ]
+  [[ $output == *"Wrote $CADDY_ETC/sites/blog.caddy and reloaded Caddy."* ]]
+  grep -qx 'ALIASES=www.blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
+  grep -q 'redir https' <(caddy_file)
+  grep -qx 'systemctl reload caddy' "$calls"
+}
+
+@test "a bad shipit.ini stops the deploy naming the file, before anything is built" {
+  host
+  put_ini $'[site]\n\tdomian = blog.example.com'
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 1 ]
+  [[ $output == *'shipit.ini has unknown keys: site.domian.'* ]]
+  [ "${lines[-1]}" = "Fix $SRV_ROOT/blog/config/shipit.ini, then run the deploy again." ]
+  [ -z "$(releases)" ]
+}
+
+@test "site.health in shipit.ini is an unknown key" {
+  host
+  put_ini "$(ini blog.example.com 'health = /up')"
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 1 ]
+  [[ $output == *'shipit.ini has unknown keys: site.health.'* ]]
+}
+
+@test "a shipit.ini committed in the repo is ignored" {
+  host
+  commit shipit.ini "$(ini other.example.com)" >/dev/null
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ]
+  grep -qx 'DOMAIN=blog.example.com' "$SHIPIT_ETC/sites/blog.conf"
+  grep -q 'blog.example.com {' "$CADDY_ETC/sites/blog.caddy"
+}
+
+# ---- The env prompt (plan §5.2 A.2c) -------------------------------------------------------------
+
+@test "env_ask writes KEY=VALUE lines in order, keeping =, #, spaces and /q inside a value" {
+  out=$BATS_TEST_TMPDIR/env.out
+  run env_ask "$out" <<<$'A=1\nB=two words\nC=x=y # z\nD=\nE=a /q b\n/q\nNOT=read'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$out")" = $'A=1\nB=two words\nC=x=y # z\nD=\nE=a /q b' ]
+  [[ $output == *'KEY=VALUE (/q when done):'* ]]
+  env_file_check "$out"
+}
+
+@test "env_ask ends at the end of input, with or without a last newline; no pairs, no file content" {
+  out=$BATS_TEST_TMPDIR/env.out
+  run env_ask "$out" < <(printf 'A=1\nB=2')
+  [ "$status" -eq 0 ]
+  [ "$(cat "$out")" = $'A=1\nB=2' ]
+  rm "$out"
+  run env_ask "$out" </dev/null
+  [ "$status" -eq 0 ] && [ ! -e "$out" ]
+  run env_ask "$out" <<<'/q'
+  [ "$status" -eq 0 ] && [ ! -e "$out" ]
+}
+
+@test "env_ask asks again for a line with no =, a bad name or a control character" {
+  out=$BATS_TEST_TMPDIR/env.out
+  run env_ask "$out" <<<$'noequals\n1A=x\nA =x\nA-B=1\n=x\nC=a\tb\nD=ok'
+  [ "$status" -eq 0 ]
+  [[ $output == *'Write it as KEY=VALUE.'* ]]
+  [[ $output == *"Invalid name '1A': use letters, digits and _, not starting with a digit."* ]]
+  [[ $output == *"Invalid name 'A ': "* ]]
+  [[ $output == *"Invalid name 'A-B': "* ]]
+  [[ $output == *"Invalid name '': "* ]]
+  [[ $output == *"A value can't contain a control character."* ]]
+  [ "$(cat "$out")" = D=ok ]
+}
+
+@test "env_ask: a repeated name overwrites the earlier value, in its place" {
+  out=$BATS_TEST_TMPDIR/env.out
+  run env_ask "$out" <<<$'A=1\nB=2\nA=3\nC=4\nB=5\n/q'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$out")" = $'A=3\nB=5\nC=4' ]
+}
+
+@test "deploy_exit removes the env temp file, so an interrupted env prompt leaves nothing behind" {
+  ENV_TMP=$SHIPIT_ETC/sites/.blog.env.abc123
+  : >"$ENV_TMP"
+  deploy_exit
+  [ ! -e "$ENV_TMP" ]
+}
+
+@test "first deploy with piped answers for shipit.ini and the env file creates blog.env (mode 600); the build gets it on stdin" {
+  host
+  no_ini
+  stub npm 'if [ "$1 $2" = "run build" ]; then mkdir -p dist && echo "built with $SECRET" >dist/index.html; fi'
+  commit package.json '{"scripts": {"build": "vite build"}}' >/dev/null
+  run cmd_deploy https://github.com/me/blog blog <<<$'blog.example.com\nstatic\ndist\nSECRET=s3cr3t value\nOTHER=1\n/q'
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [[ $output == *"Environment variables for blog, saved in $SHIPIT_ETC/sites/blog.env (root-only, never in the repo). Enter KEY=VALUE, one per line, and /q when done."* ]]
+  [[ $output == *"Saved $SHIPIT_ETC/sites/blog.env with: SECRET, OTHER. Edit it to change a value; the next deploy uses it."* ]]
+  [ "$(cat "$SHIPIT_ETC/sites/blog.env")" = $'SECRET=s3cr3t value\nOTHER=1' ]
+  [ -n "$(find "$SHIPIT_ETC/sites/blog.env" -perm 600)" ]
+  [ "$(cat "$SRV_ROOT/blog/current/dist/index.html")" = 'built with s3cr3t value' ]
+  # No temp file is left behind, and the answers never reached a command line.
+  [ -z "$(find "$SHIPIT_ETC/sites" -name '.blog.env.*')" ]
+  run ! grep -q 's3cr3t' "$calls"
+}
+
+@test "first deploy: with no env pairs there's no env file" {
+  host
+  no_ini
+  run cmd_deploy https://github.com/me/blog blog <<<$'blog.example.com\nstatic\ndist\n/q'
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
+  [ ! -e "$SHIPIT_ETC/sites/blog.env" ]
+  [ -z "$(find "$SHIPIT_ETC/sites" -name '.blog.env.*')" ]
+  [[ $output != *"Saved $SHIPIT_ETC/sites/blog.env"* ]]
+}
+
+@test "an existing env file is not asked about, and a site deployed before is not asked" {
+  host
+  printf 'A=1\n' >"$SHIPIT_ETC/sites/blog.env"
+  run cmd_deploy https://github.com/me/blog blog <<<$'B=2\n/q'
+  [ "$status" -eq 0 ]
+  [[ $output != *'KEY=VALUE (/q'* ]]
+  [ "$(cat "$SHIPIT_ETC/sites/blog.env")" = A=1 ]
+  rm "$SHIPIT_ETC/sites/blog.env"
+  run cmd_deploy blog <<<$'B=2\n/q'
+  [ "$status" -eq 0 ]
+  [[ $output != *'KEY=VALUE (/q'* ]]
+  [ ! -e "$SHIPIT_ETC/sites/blog.env" ]
 }
 
 @test "two deploys of one site run one after the other" {

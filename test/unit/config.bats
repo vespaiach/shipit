@@ -24,10 +24,10 @@ refused() {
   }
 }
 
-# site_ini <section.key> <value>: writes $BATS_TEST_TMPDIR/s.ini, a nextjs site with that key set (or,
+# write_ini <section.key> <value>: writes $BATS_TEST_TMPDIR/s.ini, a nextjs site with that key set (or,
 # for site.domain and site.type, replaced). The value is quoted, so git turns \t or \n into
 # the real character.
-site_ini() {
+write_ini() {
   local domain=blog.example.com type=nextjs extra=''
   case "$1" in
     site.domain) domain=$2 ;;
@@ -51,7 +51,6 @@ conf() {
   ini_load "$FIX/full.ini"
   [ "$INI_DOMAIN" = blog.example.com ] && [ "$INI_TYPE" = nextjs ]
   [ "${INI_ALIASES[*]}" = www.blog.example.com ]
-  [ "$INI_HEALTH" = /api/health ] && [ "$INI_HEALTH_STRICT" = 1 ]
   [ "${INI_ENV[*]}" = 'DATABASE_URL NEXT_PUBLIC_API' ]
   [ "$INI_INSTALL" = 'pnpm install --frozen-lockfile' ] && [ "$INI_BUILD" = 'pnpm build' ]
   [ "$INI_START" = 'pnpm start' ]
@@ -70,14 +69,12 @@ conf() {
 @test "ini: the minimal node example" {
   ini_load "$FIX/node.ini"
   [ "$INI_TYPE" = node ] && [ "$INI_START" = 'node server.js' ] && [ "${INI_DIRS[*]}" = uploads ]
-  [ "$INI_HEALTH" = / ] && [ -z "$INI_HEALTH_STRICT" ]
 }
 
-@test "ini: the minimal nextjs example gets the start and health defaults" {
+@test "ini: the minimal nextjs example gets the start default" {
   ini_load "$FIX/nextjs.ini"
   # shellcheck disable=SC2016 # literal: systemd expands $PORT
   [ "$INI_START" = './node_modules/.bin/next start -p $PORT' ]
-  [ "$INI_HEALTH" = / ] && [ -z "$INI_HEALTH_STRICT" ]
   # node.install and node.build defaults need the repo: left empty for the build step.
   [ -z "$INI_INSTALL" ] && [ -z "$INI_BUILD" ]
 }
@@ -90,7 +87,7 @@ conf() {
 @test "ini: a second load starts from scratch" {
   ini_load "$FIX/full.ini"
   ini_load "$FIX/static.ini"
-  [ "${#INI_ALIASES[@]}" -eq 0 ] && [ -z "$INI_HEALTH_STRICT" ] && [ -z "$INI_START" ]
+  [ "${#INI_ALIASES[@]}" -eq 0 ] && [ -z "$INI_START" ]
 }
 
 # ---- Structure -----------------------------------------------------------------------------------
@@ -100,7 +97,7 @@ conf() {
 }
 
 @test "ini: an unknown key is refused, naming it" {
-  refused unknown-key 'shipit.ini has unknown keys: site.domian. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+  refused unknown-key 'shipit.ini has unknown keys: site.domian. Use only site.domain, site.alias, site.type, site.env, node.install, node.build, node.start, static.root and data.dir.'
 }
 
 @test "ini: an unknown section is refused" {
@@ -114,14 +111,14 @@ conf() {
 }
 
 @test "ini: site.name is refused as an unknown key" {
-  refused site-name 'shipit.ini has unknown keys: site.name. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+  refused site-name 'shipit.ini has unknown keys: site.name. Use only site.domain, site.alias, site.type, site.env, node.install, node.build, node.start, static.root and data.dir.'
 }
 
 @test "ini: [include] is refused and never read" {
   # Read with includes, included.ini would supply the missing static.root and site.evil.
   run git config -f "$FIX/include.ini" --includes --list
   [[ $output == *static.root=dist* ]]
-  refused include 'shipit.ini has unknown keys: include.path. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir.'
+  refused include 'shipit.ini has unknown keys: include.path. Use only site.domain, site.alias, site.type, site.env, node.install, node.build, node.start, static.root and data.dir.'
 }
 
 @test "ini: a single-value key given twice is refused" {
@@ -161,9 +158,9 @@ conf() {
 
 @test "ini: control characters are refused in every key" {
   local key
-  for key in site.domain site.alias site.type site.health site.env node.install node.build \
-    node.start static.root data.dir; do
-    site_ini "$key" 'a\tb'
+  for key in site.domain site.alias site.type site.env node.install node.build node.start \
+    static.root data.dir; do
+    write_ini "$key" 'a\tb'
     run ini_load "$BATS_TEST_TMPDIR/s.ini"
     [ "$status" -eq 1 ] && [ "$output" = "$key in shipit.ini contains a control character (such as a newline or tab), which isn't allowed." ] || {
       echo "$key: $output"
@@ -204,28 +201,31 @@ conf() {
   done
 }
 
-@test "ini: site.health must be a plain path" {
-  refused health-space "Invalid site.health '/api/ health' in shipit.ini: use a path starting with /, made of letters, digits and . _ ~ / -."
+@test "ini: site.health is an unknown key" {
+  printf '[site]\ndomain = blog.example.com\ntype = nextjs\nhealth = /api/health\n' >"$BATS_TEST_TMPDIR/s.ini"
+  run ini_load "$BATS_TEST_TMPDIR/s.ini"
+  [ "$status" -eq 1 ]
+  [ "$output" = 'shipit.ini has unknown keys: site.health. Use only site.domain, site.alias, site.type, site.env, node.install, node.build, node.start, static.root and data.dir.' ]
 }
 
 @test "ini: other per-key patterns" {
   local kv
   for kv in site.domain=localhost site.type=php \
-    site.alias=-x.example.com site.env=1X site.env=A-B site.health=api 'site.health=/a?b'; do
-    site_ini "${kv%%=*}" "${kv#*=}"
+    site.alias=-x.example.com site.env=1X site.env=A-B; do
+    write_ini "${kv%%=*}" "${kv#*=}"
     run ini_load "$BATS_TEST_TMPDIR/s.ini"
     [ "$status" -eq 1 ] || {
       echo "accepted $kv"
       return 1
     }
   done
-  site_ini site.type php
+  write_ini site.type php
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = "Invalid site.type 'php' in shipit.ini: use static, node or nextjs." ]
-  site_ini site.env A-B
+  write_ini site.env A-B
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = "Invalid site.env 'A-B' in shipit.ini: use an environment variable name (letters, digits and _, not starting with a digit)." ]
-  site_ini node.install ''
+  write_ini node.install ''
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$output" = 'node.install in shipit.ini is empty: give a command, or leave the key out to use the default.' ]
 }
@@ -239,10 +239,6 @@ conf() {
 }
 
 @test "ini: keys that don't fit the type are refused" {
-  printf '[site]\ndomain = d.example.com\ntype = static\nhealth = /\n[static]\nroot = dist\n' \
-    >"$BATS_TEST_TMPDIR/s.ini"
-  run ini_load "$BATS_TEST_TMPDIR/s.ini"
-  [ "$output" = "site.health isn't allowed for a static site: there's no process to run." ]
   printf '[site]\ndomain = d.example.com\ntype = static\n[node]\nstart = x\n[static]\nroot = dist\n' \
     >"$BATS_TEST_TMPDIR/s.ini"
   run ini_load "$BATS_TEST_TMPDIR/s.ini"
@@ -255,6 +251,100 @@ conf() {
     >"$BATS_TEST_TMPDIR/s.ini"
   ini_load "$BATS_TEST_TMPDIR/s.ini"
   [ "$INI_BUILD" = 'vite build' ]
+}
+
+# ---- Asking for a shipit.ini (plan §5.2 A.2b) ----------------------------------------------------
+
+@test "ask: a static site (domain, type, root) gives a file ini_load accepts" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'docs.example.com\nstatic\ndist'
+  [ "$status" -eq 0 ]
+  [[ $output == *'Domain (for example blog.example.com):'* ]]
+  [[ $output == *'Folder Caddy serves, inside the release (for example dist):'* ]]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_DOMAIN" = docs.example.com ] && [ "$INI_TYPE" = static ] && [ "$INI_ROOT" = dist ]
+  [ "${#INI_DIRS[@]}" -eq 0 ] && [ -z "$INI_BUILD" ] && [ -z "$INI_START" ]
+}
+
+@test "ask: a node site (build, start, two data sub-folders)" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'api.example.com\nnode\nnpm run build\nnode server.js\nuploads\ndb\n'
+  [ "$status" -eq 0 ]
+  [[ $output == *'Build command (Enter for the default):'* ]]
+  # shellcheck disable=SC2016 # literal: the prompt shows $PORT
+  [[ $output == *'Start command; it must listen on $PORT (for example node server.js):'* ]]
+  [[ $output == *'Data sub-folder the site can write to, kept across deploys (for example uploads; Enter for none):'* ]]
+  [[ $output == *'Another data sub-folder (Enter when done):'* ]]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_DOMAIN" = api.example.com ] && [ "$INI_TYPE" = node ]
+  [ "$INI_BUILD" = 'npm run build' ] && [ "$INI_START" = 'node server.js' ]
+  [ "${INI_DIRS[*]}" = 'uploads db' ] && [ -z "$INI_ROOT" ]
+}
+
+@test "ask: a nextjs site can skip everything; a skipped build and start leave their keys out" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'blog.example.com\nnextjs\n\n\n\n'
+  [ "$status" -eq 0 ]
+  [ "$(git config -f "$BATS_TEST_TMPDIR/a.ini" --list)" = 'site.domain=blog.example.com
+site.type=nextjs' ]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  # shellcheck disable=SC2016 # literal: systemd expands $PORT
+  [ "$INI_START" = './node_modules/.bin/next start -p $PORT' ]
+  [ -z "$INI_BUILD" ] && [ "${#INI_DIRS[@]}" -eq 0 ]
+}
+
+@test "ask: a bad or empty required answer is asked again" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'Docs.example.com\n\ndocs.example.com\nphp\n\nstatic\n\n../x\ndist'
+  [ "$status" -eq 0 ]
+  [[ $output == *"Invalid domain 'Docs.example.com'"* ]]
+  [[ $output == *"Invalid domain ''"* ]]
+  [[ $output == *"Invalid site.type 'php' in shipit.ini"* ]]
+  [[ $output == *"Invalid static.root '' in shipit.ini"* ]]
+  [[ $output == *"Invalid static.root '../x' in shipit.ini"* ]]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_DOMAIN" = docs.example.com ] && [ "$INI_ROOT" = dist ]
+  # A node site must give node.start, but the build is optional.
+  run ini_ask "$BATS_TEST_TMPDIR/b.ini" <<<$'api.example.com\nnode\n\n\nnode server.js\n\n'
+  [ "$status" -eq 0 ]
+  [[ $output == *"Invalid node.start '' in shipit.ini"* ]]
+  ini_load "$BATS_TEST_TMPDIR/b.ini"
+  [ -z "$INI_BUILD" ] && [ "$INI_START" = 'node server.js' ]
+}
+
+@test "ask: an invalid data sub-folder is asked again, a repeated one is kept once" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'api.example.com\nnode\n\nnode server.js\nUp/loads\nuploads\ndb\nuploads\n\n'
+  [ "$status" -eq 0 ]
+  [[ $output == *"Invalid data.dir 'Up/loads' in shipit.ini"* ]]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "${INI_DIRS[*]}" = 'uploads db' ]
+}
+
+@test "ask: a control character is refused and asked again" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'docs.example.com\nstatic\nd\tist\ndist'
+  [ "$status" -eq 0 ]
+  [[ $output == *"static.root in shipit.ini contains a control character"* ]]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_ROOT" = dist ]
+}
+
+@test "ask: a value with # and ; round-trips" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" <<<$'api.example.com\nnode\nmake "a" ; echo #1\nnode server.js --tag=#1\n\n'
+  [ "$status" -eq 0 ]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_BUILD" = 'make "a" ; echo #1' ] && [ "$INI_START" = 'node server.js --tag=#1' ]
+}
+
+@test "ask: the end of input returns 1 and leaves no file" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" </dev/null
+  [ "$status" -eq 1 ] && [ ! -e "$BATS_TEST_TMPDIR/a.ini" ]
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" < <(printf 'docs.example.com\nstatic\n')
+  [ "$status" -eq 1 ] && [ ! -e "$BATS_TEST_TMPDIR/a.ini" ]
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" < <(printf 'api.example.com\nnode\n\nnode server.js\n')
+  [ "$status" -eq 1 ] && [ ! -e "$BATS_TEST_TMPDIR/a.ini" ]
+}
+
+@test "ask: a last answer without a newline counts" {
+  run ini_ask "$BATS_TEST_TMPDIR/a.ini" < <(printf 'docs.example.com\nstatic\ndist')
+  [ "$status" -eq 0 ]
+  ini_load "$BATS_TEST_TMPDIR/a.ini"
+  [ "$INI_ROOT" = dist ]
 }
 
 # ---- Type (plan §5.2 A.3) ---------------------------------------------------------------
@@ -353,7 +443,7 @@ conf() {
   CONF_ALIASES=(www.blog.example.com blog.example.org) CONF_PORT=3001
   site_conf_write blog
   [ "$(stat -c %a "$SHIPIT_ETC/sites/blog.conf" 2>/dev/null || stat -f %Lp "$SHIPIT_ETC/sites/blog.conf")" = 644 ]
-  [ "$(cat "$SHIPIT_ETC/sites/blog.conf")" = "# managed by shipit (shipit deploy and rollback write this file)
+  [ "$(cat "$SHIPIT_ETC/sites/blog.conf")" = "# managed by shipit (shipit deploy writes this file)
 REPO=https://github.com/me/blog
 TYPE=nextjs
 DOMAIN=blog.example.com

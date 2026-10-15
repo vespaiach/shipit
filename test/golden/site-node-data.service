@@ -1,5 +1,5 @@
-# managed by shipit: the systemd unit of the site blog. shipit deploy and rollback write it from the
-# shipit.ini of the release /srv/blog/current points at; edits here are lost.
+# managed by shipit: the systemd unit of the site blog. shipit deploy writes it from the site's
+# shipit.ini (/srv/blog/config/shipit.ini); edits here are lost.
 [Unit]
 Description=shipit site blog
 After=network.target

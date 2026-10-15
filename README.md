@@ -8,8 +8,9 @@ each of them from its GitHub repo:
 - `shipit rollback` goes back one release.
 
 Sites can be `static` (Caddy serves a folder), `node` (any server listening on `$PORT`) or `nextjs`.
-Caddy is the web server for all of them and gets their TLS certificates automatically. No command
-asks a question, so each one works over SSH from a laptop.
+Caddy is the web server for all of them and gets their TLS certificates automatically. Only a site's
+first deploy asks questions (its config and its secrets); every other command works over SSH from a
+laptop, with no terminal.
 
 [docs/plan.md](docs/plan.md) is the full spec, with the reasons behind each choice. This README is the
 manual.
@@ -68,7 +69,11 @@ file away (an apt source file is left alone instead).
 
 ## shipit.ini
 
-Each repo has a `shipit.ini` at its root, in git's config syntax. A full example:
+Each site has a `shipit.ini` on the server, at `/srv/<name>/config/shipit.ini`, in git's config
+syntax. It isn't in the repo. The site's first deploy asks for it ([Deploying](#deploying)), and every
+later deploy reads it again, so to change a site's domain, aliases, commands or data folders, edit the
+file and deploy. It belongs to root, mode 600, in a root-only folder, and only `shipit deploy` reads
+it: a rollback never does. A full example:
 
 ```ini
 # deployed as: shipit deploy https://github.com/<owner>/<repo> blog
@@ -76,7 +81,6 @@ Each repo has a `shipit.ini` at its root, in git's config syntax. A full example
 domain = blog.example.com
 alias = www.blog.example.com
 type = nextjs
-health = /api/health
 env = DATABASE_URL
 env = NEXT_PUBLIC_API
 
@@ -127,7 +131,6 @@ type = nextjs
 | `site.domain` | yes | The site's hostname, lowercase. No other site may use it. |
 | `site.alias` | no, repeatable | Another hostname, redirected (308) to `site.domain`. |
 | `site.type` | yes | `static`, `node` or `nextjs`. Can't change after the first deploy. |
-| `site.health` | no | `node`/`nextjs` only. The path checked after a restart. Default `/`, which passes with any status below 500; set, it must answer exactly 200. Letters, digits and `. _ ~ / -`, starting with `/`. |
 | `site.env` | no, repeatable | A key that must be in the site's env file ([Secrets](#secrets)); the deploy fails, naming the missing ones. |
 | `node.install` | no | Install command. Default, by lockfile: `npm ci` (`package-lock.json`), `pnpm install --frozen-lockfile` (`pnpm-lock.yaml`), `yarn install --immutable` (`yarn.lock`), `npm install` (only `package.json`), else none. Runs without secrets. |
 | `node.build` | no | Build command. Default: `npm run build` if `package.json` has a `build` script, else none. Gets the secrets. |
@@ -139,7 +142,9 @@ Rules and quirks:
 
 - Unknown sections or keys, a key that doesn't fit the type (`static.root` on a node site,
   `node.start` on a static one), a single-value key given twice, a repeated value, an empty value, or
-  a control character all fail the deploy before anything is built. A syntax error names its line.
+  a control character all fail the deploy before anything is built, with "Fix
+  /srv/<name>/config/shipit.ini, then run the deploy again." A syntax error names its line. There's
+  no `site.health`: the health check always polls `/`, so that key is refused like any unknown one.
 - A `static` site may still have `node.install` and `node.build` (Vite, `next export`).
 - `#` and `;` start a comment **even in the middle of a value**, so quote a value that contains
   them: `start = "node server.js --tag=#1"`.
@@ -152,9 +157,10 @@ The first deploy of a site names the repo (only `https://github.com/<owner>/<rep
 `.git`) and the site:
 
 ```bash
-ssh root@vps shipit deploy https://github.com/me/docs docs
+ssh -t root@vps shipit deploy https://github.com/me/docs docs
 ```
 
+`-t` gives the first deploy a terminal for its questions ([below](#the-first-deploys-questions)).
 Later deploys use the name, optionally with a branch, a tag or a full 40-character commit SHA (the
 default is the repo's default branch):
 
@@ -180,35 +186,98 @@ it turns private later, create the key by hand and add its `.pub` to GitHub:
 
 1. Takes the site's lock (a second deploy or rollback of the same site waits: "Another deploy or
    rollback of docs is running; waiting.").
-2. On a first deploy, creates the users `<name>` and `<name>-build`, `/srv/<name>/` and
-   `/etc/shipit/sites/<name>.conf`.
-3. As `<name>-build`, fetches the repo's branches and tags, resolves the ref, and checks
-   `shipit.ini` at that commit: its type must match the site's, its domain and aliases must
+2. On a first deploy, creates the users `<name>` and `<name>-build`, `/srv/<name>/` (with its
+   root-only `config/` folder) and `/etc/shipit/sites/<name>.conf`. If the site has no `shipit.ini`
+   yet, it asks for it, and on a first deploy it offers to create the env file too ([below](#the-first-deploys-questions),
+   [Secrets](#secrets)); this comes after the private-repo check, so a deploy-key stop happens before
+   any typing.
+3. As `<name>-build`, fetches the repo's branches and tags and resolves the ref. Then it checks the
+   site's `shipit.ini` (not the repo's): its type must match the site's, its domain and aliases must
    not be used by another site, the env file must parse and hold every `site.env` key.
 4. Builds, one site at a time on the VPS ("Another site is building; waiting."): a new folder
    `releases/<UTC time>-<sha>/` gets the commit's files, then the install and build commands run in
    it as `<name>-build`. For a static site, `static.root` must exist and contain no symlink pointing
    outside it.
 5. Switches: `previous` points at the old release and `current` at the new one, each in one atomic
-   rename. The Caddy file (and for node/nextjs the systemd unit) is rendered from the new release's
-   `shipit.ini`, validated, installed, and Caddy is reloaded if it changed (never restarted).
-   Node/Next.js sites are restarted and health-checked ([below](#node-and-nextjs-sites)).
+   rename. The Caddy file (and for node/nextjs the systemd unit) is rendered from the site's
+   `shipit.ini`, validated, installed, and Caddy is reloaded if it changed (never restarted). A file
+   that didn't change is left alone, and a changed one is reported ("Wrote
+   /etc/caddy/sites/docs.caddy and reloaded Caddy."). Node/Next.js sites are restarted and
+   health-checked ([below](#node-and-nextjs-sites)).
 6. Deletes every release except `current` and `previous`, and prints "Deployed docs: now serving
    <release>."
 
 A failed fetch, check or build changes nothing that's live. A config that doesn't validate, or a
 failed health check, switches back ("Deploy failed health check; still serving <release>.", or
-"Deploy failed: the new release's config couldn't be installed; still serving <release>."). A failed
-first deploy removes what it installed and prints "First deploy of docs failed; nothing is served.";
-it keeps the users and the port, so fix the problem and run the same command again.
+"Deploy failed: the new release's config couldn't be installed; still serving <release>."). Switching
+back restores the code only, not the config: what the deploy installed stays (see [Rolling
+back](#rolling-back)). A failed first deploy removes what it installed and prints "First deploy of
+docs failed; nothing is served."; it keeps the users, the port, `shipit.ini` and the env file, so fix
+the problem and run the same command again, without answering again.
 
-A site's name is the one you gave on its first deploy (`shipit deploy <repo-url> <name>`); `shipit.ini` doesn't hold it. The name and the type can't change after that. To rename it or change its type, remove
-it ([Removing a site](#removing-a-site)) and deploy it again.
+A site's name is the one you gave on its first deploy (`shipit deploy <repo-url> <name>`); `shipit.ini`
+doesn't hold it, it's in the file's path. The name and the type can't change after that. To rename it
+or change its type, remove it ([Removing a site](#removing-a-site)) and deploy it again.
+
+### The first deploy's questions
+
+A site with no `shipit.ini` yet (its first deploy, or the rerun of one that stopped before the file
+was saved) is asked for one, a question per line. Each answer is checked like the key it sets, and
+asked again if it's refused. A blank answer to an optional question leaves the key out, so its default
+applies.
+
+1. `Domain (for example blog.example.com):` (`site.domain`)
+2. `Site type (static, node or nextjs):` (`site.type`)
+3. `static` sites: `Folder Caddy serves, inside the release (for example dist):` (`static.root`)
+4. `node` and `nextjs` sites: `Build command (Enter for the default):` (`node.build`, optional)
+5. `node` and `nextjs` sites: `Start command; it must listen on $PORT (for example node server.js):`
+   (`node.start`; required for `node`. For `nextjs` the question ends `; Enter for the default):` and a
+   blank answer is fine.)
+6. `node` and `nextjs` sites: `Data sub-folder the site can write to, kept across deploys (for example
+   uploads; Enter for none):`, then `Another data sub-folder (Enter when done):` until a blank answer
+   (each is a `data.dir`; a name given twice is kept once).
+
+Then it prints "Saved /srv/docs/config/shipit.ini. Edit it to add aliases, site.env or node.install; the
+next deploy applies them." Aliases, `site.env` and `node.install` aren't asked: add them by editing the
+file.
+
+Answers can be piped instead of typed (a `node` site's end with a blank line for the data folders):
+
+```bash
+printf 'docs.example.com\nstatic\ndist\n' | ssh root@vps shipit deploy https://github.com/me/docs docs
+```
+
+With nothing to read (no terminal, `ssh` without `-t`, Ctrl-D) the deploy stops: "There's no
+/srv/docs/config/shipit.ini and nothing to ask. Run the deploy in a terminal (ssh -t), or write the file
+by hand (the keys are in the README), then run the same command again." The site stays registered, so
+the same command resumes. Instead of answering, write the file by hand (root, mode 600, in
+`/srv/<name>/config/`, which that run already made; the keys are in the table [above](#shipitini)).
+
+If a site that already deployed loses its file, the deploy refuses, without asking: "/srv/docs/config/shipit.ini
+is missing, and docs was deployed before, so shipit won't guess its settings. Put the file back (the keys
+are in the README), then run the deploy again."
 
 ## Secrets
 
-Secrets never go in the repo. Put them on the VPS in `/etc/shipit/sites/<name>.env`, owned by root
-with mode 600:
+Secrets never go in the repo. They live on the VPS in `/etc/shipit/sites/<name>.env`, owned by root
+with mode 600. A site's first deploy offers to create the file, right after the `shipit.ini` questions
+(and only if the file doesn't exist yet):
+
+> Environment variables for blog, saved in /etc/shipit/sites/blog.env (root-only, never in the repo).
+> Enter KEY=VALUE, one per line, and /q when done.
+
+It then asks `KEY=VALUE (/q when done):` until you answer `/q`. The line is split at the first `=`, so a
+value may hold `=`, spaces or `#`; it may be empty. A line with no `=` ("Write it as KEY=VALUE."), a
+name that isn't letters, digits and `_` or starts with a digit ("Invalid name '<x>': use letters,
+digits and _, not starting with a digit.") or a control character ("A value can't contain a control
+character.") is asked again. Entering a name twice keeps the later value. **The values are echoed as you
+type them**, so they show in the terminal and its scrollback. The file is written once, at the end
+(root only, never on a command line), and shipit prints "Saved /etc/shipit/sites/blog.env with: <NAMES>.
+Edit it to change a value; the next deploy uses it." With no pairs there's no file, and with no
+terminal (the input ends) the step is skipped. Later deploys never ask, and entering a name doesn't
+add `site.env` to `shipit.ini`: add it yourself if a deploy should fail when the key goes missing.
+
+You can also write the file by hand, at any time:
 
 ```bash
 ssh root@vps 'touch /etc/shipit/sites/blog.env && chmod 600 /etc/shipit/sites/blog.env'
@@ -251,11 +320,13 @@ user `<name>` in `/srv/<name>/current`, hardened (read-only system, private `/tm
 privileges, may bind only its own port), restarted on failure and enabled at boot. Caddy proxies the
 domain to `127.0.0.1:<port>`. A deploy restarts the process, so expect a gap of 1–3 s.
 
-**Health check and auto-revert.** After the restart, shipit polls
-`http://127.0.0.1:<port><site.health>` with the site's `Host` header, every second for up to 60 s.
-Without `site.health`, any status below 500 passes (redirects aren't followed, so `/` redirecting to
-a login page is fine); with it, only exactly 200 does. If the site doesn't pass, the deploy switches
-back to the previous release, restarts and checks it, deletes the failed release and exits non-zero.
+**Health check and auto-revert.** After the restart, shipit polls `http://127.0.0.1:<port>/` with the
+site's `Host` header, every second for up to 60 s. Any status below 500 passes (redirects aren't
+followed, so `/` redirecting to a login page is fine); there's no setting for another path. If the
+site doesn't pass, the deploy switches back to the previous release, restarts and checks it, deletes
+the failed release and exits non-zero. The config the deploy installed stays, so if the config itself
+broke the site (a bad `node.start`), the old release can fail its check too ("<release> didn't come
+back up either; fix the error above."): fix `shipit.ini` and deploy again.
 
 ### Data folders
 
@@ -291,18 +362,17 @@ ssh root@vps shipit rollback docs
 - **One step.** It swaps `current` and `previous`; running it again returns to where you started.
   Nothing is deleted; the next deploy drops whichever release is then `previous`. A site with one
   release says "docs has no previous release to roll back to."
-- **Code and config.** The Caddy file and unit are rendered from the `shipit.ini` of the release
-  that's now live, so a changed `static.root`, alias, `node.start` or `data.dir` goes back too. Its
-  domains are checked against the other sites as they are now. Node/Next.js sites are restarted and
-  health-checked as on a deploy.
+- **Code only.** Rollback swaps the code and restarts a node/nextjs site, health-checking `/` as a
+  deploy does. It never reads, restores or applies `shipit.ini`: the Caddy file, the unit and the
+  site's `.conf` stay as the last deploy left them, and it works even if `shipit.ini` is invalid or
+  gone. So a changed `static.root`, alias, `node.start` or `data.dir` doesn't go back: rolling back
+  across a `static.root` change leaves Caddy serving the new folder inside the older release, which
+  may not have it (404); put `static.root` back and deploy the old ref instead.
 - **Not data.** `/var/lib/shipit-<name>` and the env file are untouched. **Schema changes (e.g.
   SQLite migrations) must keep working with the previous release for one version.**
-- Success prints "Rolled back docs: now serving <release>." On failure it swaps back, restores the
-  config, restarts the release that was live and exits non-zero ("Rollback failed health check;
-  still serving <release>.").
-
-Each release's commit is pinned in the site's `repo.git`, so rollback works after a force-push and
-`git gc`.
+- Success prints "Rolled back docs: now serving <release>." On failure it swaps back, restarts the
+  release that was live and exits non-zero ("Rollback failed health check; still serving
+  <release>.").
 
 ## Logs
 
@@ -321,11 +391,12 @@ output goes to the SSH session (and so the Actions log) and isn't kept on the VP
 ```
 /etc/shipit/host.conf                       Node.js major, fixed by the first setup
 /etc/shipit/sites/<name>.conf               repo, type, domains, port (written by shipit)
-/etc/shipit/sites/<name>.env                secrets (root only, 600)
+/etc/shipit/sites/<name>.env                secrets (root only, 600; a first deploy can create it)
 /etc/caddy/Caddyfile                        global options, imports sites/*.caddy
 /etc/caddy/sites/<name>.caddy               the site's Caddy config
 /etc/systemd/system/shipit-<name>.service   the site's unit (node/nextjs)
 /srv/<name>/
+  config/shipit.ini                         the site's config (root only, 600)
   repo.git/                                 bare clone, fetched on each deploy
   releases/<UTC time>-<sha>/                at most two after a deploy
   current  -> releases/...
@@ -339,8 +410,9 @@ output goes to the SSH session (and so the Actions log) and isn't kept on the VP
 
 Who can do what:
 
-- **root** runs shipit and never runs repo code: `shipit.ini` is parsed as data with `git config`,
-  never sourced.
+- **root** runs shipit and never runs repo code: `shipit.ini` (the admin's file, in a root-only
+  folder) is parsed as data with `git config`, never sourced, and the repo's files are only read as
+  data.
 - **`<name>-build`** runs every repo command (fetch, install, build) with a clean environment. It
   can write only the release being built; root takes each release back when its build ends, so a
   build can't change a live release or repoint `current`.

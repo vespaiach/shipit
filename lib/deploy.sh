@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # shipit deploy: builds a site from GitHub and switches to it (plan §5.2): resolve the site (A), build
 # a release (B), switch to it (C), prune (D). cmd_deploy calls the deploy_* steps in that order.
-# site_apply_config (render the config from `current`, plan §5.5) and site_restart_and_check (restart
-# and health check, C.3) are shared with revert and rollback.
+# site_apply_config (render the config from the loaded shipit.ini, plan §5.5) is deploy's alone;
+# site_restart_and_check (restart and health check, C.3) is shared with revert and rollback.
 # Sourcing this file only defines constants and functions. Needs lib/common.sh.
 
 # shellcheck source=lib/config.sh
@@ -63,14 +63,55 @@ env_file_check() {
   done <"$1"
 }
 
+# env_ask <out file>: asks on stdin, one KEY=VALUE line per prompt (stderr), until /q or the end of
+# input, then writes the pairs to the file in the env file's format, in the order first given (plan §5.2
+# A.2c). A line with no =, a bad name or a control character is asked again; a repeated name replaces
+# the earlier value in its place. With no pairs the file isn't written.
+env_ask() {
+  local LC_ALL=C line key value i found
+  local -a keys=() values=()
+  while :; do
+    printf '%s ' 'KEY=VALUE (/q when done):' >&2
+    if ! read -r line && [ -z "$line" ]; then
+      err ''
+      break
+    fi
+    [ "$line" != /q ] || break
+    if [[ $line == *[[:cntrl:]]* ]]; then
+      err "A value can't contain a control character."
+      continue
+    fi
+    if [[ $line != *=* ]]; then
+      err 'Write it as KEY=VALUE.'
+      continue
+    fi
+    key=${line%%=*} value=${line#*=}
+    check_env_key "$key" || continue
+    found=-1
+    for i in "${!keys[@]}"; do
+      [ "${keys[i]}" != "$key" ] || found=$i
+    done
+    if [ "$found" -ge 0 ]; then
+      values[found]=$value
+    else
+      keys+=("$key")
+      values+=("$value")
+    fi
+  done
+  [ "${#keys[@]}" -gt 0 ] || return 0
+  for i in "${!keys[@]}"; do
+    printf '%s=%s\n' "${keys[i]}" "${values[i]}"
+  done >"$1"
+}
+
 # Run as <name>-build: runs the command line $2 with sh, in the folder $1.
 # shellcheck disable=SC2016 # expanded by sh, not here
 RUN_IN='cd "$1" || exit 1
 exec sh -c "$2"'
 
 # This deploy's state.
-SITE='' URL='' REF='' SITE_DIR='' BUILD_USER='' DEPLOY_TMP='' GIT_URL='' SHA=''
-RELEASE='' RELEASE_DIR='' SWITCHED='' OLD_CURRENT='' OLD_PREVIOUS='' SITE_LOCK_FD=''
+SITE='' URL='' REF='' SITE_DIR='' CONFIG_FILE='' BUILD_USER='' DEPLOY_TMP='' GIT_URL='' SHA=''
+RELEASE='' RELEASE_DIR='' SWITCHED='' OLD_CURRENT='' OLD_PREVIOUS='' SITE_LOCK_FD='' ENV_TMP=''
 GIT_ENV=(GIT_TERMINAL_PROMPT=0)
 
 # ---- Small parsers and checks (unit-tested) ------------------------------------------------------
@@ -214,17 +255,6 @@ prune_releases() {
   done
 }
 
-# prune_refs <kept release>...: reads refs/shipit/<sha> names on stdin and prints those no kept
-# release has the SHA of (plan §5.2 D). Pins left by failed builds go too.
-prune_refs() {
-  local ref name keep=' '
-  for name; do keep+="$(release_sha "$name") "; done
-  while IFS= read -r ref; do
-    [[ $ref =~ ^refs/shipit/([0-9a-f]{40})$ ]] || continue
-    [[ $keep == *" ${BASH_REMATCH[1]} "* ]] || printf '%s\n' "$ref"
-  done
-}
-
 # ---- Running things as the build user ------------------------------------------------------------
 
 # as_build <command> [arg]...: runs a command as <name>-build with umask 027, a clean environment
@@ -243,16 +273,6 @@ git_remote() { as_build env "${GIT_ENV[@]}" git "$@"; }
 
 # git_build <git args>: the same, in the site's repo.git.
 git_build() { git_remote -C "$SITE_DIR/repo.git" "$@"; }
-
-# site_ini <sha> <file>: copies shipit.ini at that commit into a root-owned file (the build user's git
-# writes to root's redirect) and loads it with ini_load (plan §3).
-site_ini() {
-  if ! git_build show "$1:shipit.ini" >"$2" 2>/dev/null </dev/null; then
-    err "Commit $1 has no shipit.ini at the root of the repo. Add one (see docs/plan.md section 3)."
-    return 1
-  fi
-  ini_load "$2"
-}
 
 # link_target <link>: prints where a site link (current, previous) points, releases/<name>; nothing
 # when the link is missing. Fails on anything shipit wouldn't have made.
@@ -376,17 +396,15 @@ site_unit_remove() {
   systemctl daemon-reload || err "systemctl daemon-reload failed."
 }
 
-# site_health_check: polls http://127.0.0.1:<PORT><site.health> with Host: <site.domain> until
-# health_ok accepts the status (exactly 200 when site.health is set) or HEALTH_TIMEOUT runs out.
-# Values come from INI_* and CONF_PORT.
+# site_health_check: polls http://127.0.0.1:<PORT>/ with Host: <domain> until health_ok accepts the
+# status (anything below 500) or HEALTH_TIMEOUT runs out. Values come from CONF_PORT and CONF_DOMAIN.
 site_health_check() {
-  local url=http://127.0.0.1:$CONF_PORT$INI_HEALTH code need='a status below 500'
+  local url=http://127.0.0.1:$CONF_PORT/ code
   local end=$((SECONDS + HEALTH_TIMEOUT))
-  [ -z "$INI_HEALTH_STRICT" ] || need=200
   while :; do
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$HEALTH_MAX_TIME" \
-      -H "Host: $INI_DOMAIN" "$url" </dev/null) || true
-    if health_ok "$code" "$INI_HEALTH_STRICT"; then
+      -H "Host: $CONF_DOMAIN" "$url" </dev/null) || true
+    if health_ok "$code"; then
       log "$url answered $code."
       return 0
     fi
@@ -394,17 +412,17 @@ site_health_check() {
     sleep "$HEALTH_INTERVAL"
   done
   [[ $code =~ ^[1-5][0-9][0-9]$ ]] && code="answered $code" || code='gave no answer'
-  err "$url (Host: $INI_DOMAIN) $code within $HEALTH_TIMEOUT s; it needs $need. Check: journalctl -u shipit-$SITE"
+  err "$url (Host: $CONF_DOMAIN) $code within $HEALTH_TIMEOUT s; it needs a status below 500. Check: journalctl -u shipit-$SITE"
   return 1
 }
 
-# site_restart_and_check: after site_apply_config, restarts a node/nextjs site and health-checks it
-# (plan §5.2 C.3). nextjs: stop, empty the cache, start, so a release never sees another's cache.
-# Static: nothing to do. Fails if the restart or the health check does. Shared with revert and
-# rollback.
+# site_restart_and_check: restarts a node/nextjs site and health-checks it (plan §5.2 C.3). nextjs:
+# stop, empty the cache, start, so a release never sees another's cache. Static: nothing to do. Fails
+# if the restart or the health check does. It needs CONF_TYPE, CONF_DOMAIN and CONF_PORT: deploy's
+# site_apply_config sets them; revert and rollback read <name>.conf. Shared with revert and rollback.
 site_restart_and_check() {
   local unit=shipit-$SITE
-  case "$INI_TYPE" in
+  case "$CONF_TYPE" in
     static) return 0 ;;
     node) systemctl restart "$unit" || {
       err "Restarting $unit failed. Check: journalctl -u $unit"
@@ -421,19 +439,12 @@ site_restart_and_check() {
   site_health_check
 }
 
-# site_apply_config: renders the site's config from the shipit.ini of the release `current` points at,
-# checked again as in plan §3 (with the clash check), validates all of it, installs it, and writes
-# TYPE, DOMAIN and ALIASES to <name>.conf (plan §5.5). node/nextjs: the unit too, and a proxy to PORT.
-# Used after every switch, revert and rollback; site_restart_and_check follows it.
+# site_apply_config: renders the site's config from the shipit.ini deploy_fetch loaded (INI_*), checks
+# the hostnames against the other sites again (they may have changed during the build), validates all of
+# it, installs it, and writes TYPE, DOMAIN and ALIASES to <name>.conf (plan §5.5). node/nextjs: the unit
+# too, and a proxy to PORT. Only deploy applies config; site_restart_and_check follows it.
 site_apply_config() {
-  local target sha caddy=$DEPLOY_TMP/site.caddy unit=$DEPLOY_TMP/unit/shipit-$SITE.service PORT
-  target=$(link_target "$SITE_DIR/current") || return 1
-  if [ -z "$target" ]; then
-    err "$SITE_DIR/current is missing."
-    return 1
-  fi
-  sha=$(release_sha "${target#releases/}") || return 1
-  site_ini "$sha" "$DEPLOY_TMP/current.ini" || return 1
+  local caddy=$DEPLOY_TMP/site.caddy unit=$DEPLOY_TMP/unit/shipit-$SITE.service PORT
   ini_check_clash "$SITE" || return 1
   if [ "$INI_TYPE" = static ]; then
     render_site_caddy site-static.caddy ROOT >"$caddy" || return 1
@@ -493,6 +504,7 @@ site_users() {
 site_dirs() {
   site_dir "$SITE_DIR" "root:$SITE" 2750
   site_dir "$SITE_DIR/releases" "root:$SITE" 2750
+  site_dir "$SITE_DIR/config" root:root 00700
   site_dir "$SITE_DIR/home" "$BUILD_USER:$SITE" 00700
   site_dir "$SITE_DIR/.ssh" "$BUILD_USER:$SITE" 00700
   site_dir "$SITE_DIR/repo.git" "$BUILD_USER:$SITE" 00700
@@ -566,7 +578,44 @@ deploy_access() {
   die "Can't fetch $CONF_REPO. If it's a private repo, add this key as a read-only deploy key at https://github.com/$(repo_slug "$CONF_REPO")/settings/keys/new, then run the same command again."
 }
 
-# A.3: fetches, resolves the ref to a full SHA, and checks shipit.ini at that commit.
+# A.2b: the site's shipit.ini (plan §3). There: nothing to do. Missing on a site that never deployed
+# (a first deploy, or a rerun of one that stopped before the file was saved): asked for on stdin and
+# saved root-only. Missing on a site that deployed: refused, because asking would forget its aliases,
+# env keys and data folders. No input to ask with: refused, and the same command resumes.
+deploy_ini() {
+  local tmp=$DEPLOY_TMP/shipit.ini
+  [ -e "$CONFIG_FILE" ] && return 0
+  if [ -n "$CONF_TYPE" ]; then
+    die "$CONFIG_FILE is missing, and $SITE was deployed before, so shipit won't guess its settings. Put the file back (the keys are in the README), then run the deploy again."
+  fi
+  ini_ask "$tmp" \
+    || die "There's no $CONFIG_FILE and nothing to ask. Run the deploy in a terminal (ssh -t), or write the file by hand (the keys are in the README), then run the same command again."
+  install -m 600 -- "$tmp" "$CONFIG_FILE" || die "Couldn't write $CONFIG_FILE."
+  log "Saved $CONFIG_FILE. Edit it to add aliases, site.env or node.install; the next deploy applies them."
+}
+
+# A.2c: a site's first deploy offers to create <name>.env (plan §4): KEY=VALUE prompts until /q. It's
+# written once at the end, through a temp file in the same folder, root-only, so an interrupted run
+# saves nothing. Only for a site that never deployed and has no env file; with no pairs there's no file.
+deploy_env() {
+  local env=$SHIPIT_ETC/sites/$SITE.env tmp names
+  [ -z "$CONF_TYPE" ] && [ ! -e "$env" ] || return 0
+  err "Environment variables for $SITE, saved in $env (root-only, never in the repo). Enter KEY=VALUE, one per line, and /q when done."
+  tmp=$(mktemp "$SHIPIT_ETC/sites/.$SITE.env.XXXXXX") || die "Couldn't write $env."
+  ENV_TMP=$tmp # deploy_exit removes it if the prompts are interrupted
+  env_ask "$tmp"
+  if [ ! -s "$tmp" ]; then
+    rm -f -- "$tmp"
+    ENV_TMP=''
+    return 0
+  fi
+  names=$(sed 's/=.*//' "$tmp")
+  mv -f -- "$tmp" "$env" || die "Couldn't write $env."
+  ENV_TMP=''
+  log "Saved $env with: ${names//$'\n'/, }. Edit it to change a value; the next deploy uses it."
+}
+
+# A.3: fetches, resolves the ref to a full SHA, and loads the site's shipit.ini.
 deploy_fetch() {
   local rev=$REF branch first=no env=$SHIPIT_ETC/sites/$SITE.env missing
   [ -n "$CONF_TYPE" ] || first=yes
@@ -588,7 +637,7 @@ deploy_fetch() {
   [[ $SHA =~ ^[0-9a-f]{40}$ ]] \
     || die "Can't find ${REF:-$branch} in $CONF_REPO. Use a branch, a tag, or the full SHA of a commit on one."
 
-  site_ini "$SHA" "$DEPLOY_TMP/shipit.ini" || die "Fix shipit.ini, then run the deploy again."
+  ini_load "$CONFIG_FILE" || die "Fix $CONFIG_FILE, then run the deploy again."
   [ "$first" = yes ] || ini_check_type "$CONF_TYPE" || exit 1
   ini_check_clash "$SITE" || exit 1
   if [ -e "$env" ]; then
@@ -673,7 +722,6 @@ deploy_build() {
   # shellcheck disable=SC2016 # expanded by the build user's bash
   as_build bash -c 'set -o pipefail && git -C "$1" archive --format=tar "$2" | tar -x -f - -C "$3"' \
     extract "$SITE_DIR/repo.git" "$SHA" "$RELEASE_DIR" </dev/null || die "Extracting $SHA failed."
-  git_build update-ref "refs/shipit/$SHA" "$SHA" </dev/null || die "Pinning $SHA in repo.git failed."
   release_commands
   [ "$INI_TYPE" != nextjs ] || release_nextjs_cache
   # A process the build left running could still write to the release through files it holds open.
@@ -704,9 +752,10 @@ deploy_switch() {
   fi
 }
 
-# C.4 revert <reason>: puts current and previous back, re-renders from the restored release, restarts
-# it, deletes the failed one and exits non-zero. A first deploy leaves nothing served: the unit is
-# stopped, disabled and deleted, and <name>.conf goes back to REPO (and PORT), so a rerun starts over.
+# C.4 revert <reason>: puts current and previous back, restarts the restored release (the config stays as
+# the failed deploy left it), deletes the failed one and exits non-zero. A first deploy leaves nothing
+# served: the unit is stopped, disabled and deleted, and <name>.conf goes back to REPO (and PORT), so a
+# rerun starts over; shipit.ini and the env file stay, so it doesn't ask again.
 deploy_revert() {
   local caddy=$CADDY_ETC/sites/$SITE.caddy
   if [ -z "$OLD_CURRENT" ]; then
@@ -728,17 +777,15 @@ deploy_revert() {
   else
     rm -f -- "$SITE_DIR/previous"
   fi
-  if ! site_apply_config; then
-    err "Installing the config of ${OLD_CURRENT#releases/} again failed too; fix the error above."
-  elif ! site_restart_and_check; then
+  if ! site_conf_read "$SITE" || ! site_restart_and_check; then
     err "${OLD_CURRENT#releases/} didn't come back up either; fix the error above."
   fi
   rm -rf -- "$RELEASE_DIR"
   die "$1; still serving ${OLD_CURRENT#releases/}."
 }
 
-# C.2, C.3: the config from the new current, then (node/nextjs) restart and health check; revert if
-# either fails.
+# C.2, C.3: the config from the loaded shipit.ini, then (node/nextjs) restart and health check; revert
+# if either fails.
 deploy_config() {
   site_apply_config || deploy_revert "Deploy failed: the new release's config couldn't be installed"
   site_restart_and_check || deploy_revert "Deploy failed health check"
@@ -747,8 +794,8 @@ deploy_config() {
 # ---- D. Prune ------------------------------------------------------------------------------------
 
 deploy_prune() {
-  local current previous name ref
-  local -a names=() gone refs
+  local current previous name
+  local -a names=() gone
   current=$(link_target "$SITE_DIR/current") && previous=$(link_target "$SITE_DIR/previous") || exit 1
   current=${current#releases/} previous=${previous#releases/}
   for name in "$SITE_DIR"/releases/*; do
@@ -757,11 +804,6 @@ deploy_prune() {
   mapfile -t gone < <(printf '%s\n' "${names[@]}" | prune_releases "$current" "$previous")
   for name in "${gone[@]}"; do
     rm -rf -- "${SITE_DIR:?}/releases/$name" || die "Deleting $SITE_DIR/releases/$name failed."
-  done
-  mapfile -t refs < <(git_build for-each-ref --format='%(refname)' refs/shipit/ </dev/null \
-    | prune_refs "$current" ${previous:+"$previous"})
-  for ref in "${refs[@]}"; do
-    git_build update-ref -d "$ref" </dev/null || die "Unpinning $ref in repo.git failed."
   done
 }
 
@@ -778,12 +820,13 @@ site_lock() {
 # Deletes a release that was never switched to, and the temp folder.
 deploy_exit() {
   if [ -n "$RELEASE_DIR" ] && [ -z "$SWITCHED" ]; then rm -rf -- "$RELEASE_DIR"; fi
+  [ -z "$ENV_TMP" ] || rm -f -- "$ENV_TMP"
   [ -z "$DEPLOY_TMP" ] || rm -rf -- "$DEPLOY_TMP"
 }
 
 cmd_deploy() {
   deploy_args "$@" || exit 1
-  SITE_DIR=$SRV_ROOT/$SITE BUILD_USER=$SITE-build
+  SITE_DIR=$SRV_ROOT/$SITE CONFIG_FILE=$SRV_ROOT/$SITE/config/shipit.ini BUILD_USER=$SITE-build
   DEPLOY_TMP=$(mktemp -d) || die "Couldn't make a temp folder."
   trap deploy_exit EXIT
   # caddy validates the site's Caddy file from here as the caddy user. Nothing in it is secret.
@@ -794,6 +837,8 @@ cmd_deploy() {
   site_lock
   deploy_resolve
   deploy_access
+  deploy_ini
+  deploy_env
   deploy_fetch
   deploy_build
   deploy_switch

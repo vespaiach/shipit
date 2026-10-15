@@ -1,7 +1,8 @@
 # shellcheck shell=bash
-# shipit rollback: goes back exactly one release (plan §5.3): swaps current and previous, renders the
-# config from the new current (site_apply_config, plan §5.5), restarts and health-checks it
-# (site_restart_and_check), and swaps back if either fails. Reuses lib/deploy.sh's helpers and state.
+# shipit rollback: goes back exactly one release (plan §5.3): swaps current and previous, restarts and
+# health-checks it (site_restart_and_check), and swaps back if that fails. It never reads or applies
+# shipit.ini (plan §5.5): the config stays as the last deploy left it. Reuses lib/deploy.sh's helpers
+# and state.
 # Sourcing this file only defines constants and functions. Needs lib/common.sh.
 
 # shellcheck source=lib/deploy.sh
@@ -20,19 +21,17 @@ rollback_args() {
 }
 
 # rollback_links <current> <previous>: points the two links at the releases given, previous first, as
-# deploy does (C.1): a crash in between leaves current, and the config rendered from it, as they were.
+# deploy does (C.1): a crash in between leaves current as it was.
 rollback_links() {
   atomic_link "$2" "$SITE_DIR/previous" && atomic_link "$1" "$SITE_DIR/current"
 }
 
-# rollback_revert <reason>: puts current and previous back, re-renders the config from the original
-# current and restarts it (best effort, reporting a failure), then exits non-zero.
+# rollback_revert <reason>: puts current and previous back and restarts the original current (best
+# effort, reporting a failure), then exits non-zero.
 rollback_revert() {
   rollback_links "$OLD_CURRENT" "$OLD_PREVIOUS" \
     || die "Switching the links back failed. Fix them by hand: current -> $OLD_CURRENT, previous -> $OLD_PREVIOUS."
-  if ! site_apply_config; then
-    err "Installing the config of ${OLD_CURRENT#releases/} again failed too; fix the error above."
-  elif ! site_restart_and_check; then
+  if ! site_restart_and_check; then
     err "${OLD_CURRENT#releases/} didn't come back up either; fix the error above."
   fi
   die "$1; still serving ${OLD_CURRENT#releases/}."
@@ -60,7 +59,6 @@ cmd_rollback() {
 
   log "Rolling back $SITE to ${OLD_PREVIOUS#releases/}."
   rollback_links "$OLD_PREVIOUS" "$OLD_CURRENT" || rollback_revert "Rollback failed: switching the links failed"
-  site_apply_config || rollback_revert "Rollback failed: the previous release's config couldn't be installed"
   site_restart_and_check || rollback_revert "Rollback failed health check"
   LOCK_FD=$SITE_LOCK_FD
   lock_release
