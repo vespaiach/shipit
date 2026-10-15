@@ -1,0 +1,6 @@
+
+# ${ALIAS} is an alias of ${DOMAIN}, redirected to it.
+${ALIAS} {
+	import shipit-${SITE}-log
+	redir https://${DOMAIN}{uri} 308
+}

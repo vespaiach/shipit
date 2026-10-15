@@ -1,8 +1,9 @@
 # shipit
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
-> milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser) and M2 (`shipit setup`) are done.
-> `deploy` and `rollback` aren't implemented yet, and `setup --ci-key` comes with CI support (M6).
+> milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser), M2 (`shipit setup`) and M3
+> (`shipit deploy` for static sites) are done. Node and Next.js deploys (M4), `rollback` (M5) and
+> `setup --ci-key` (M6) aren't implemented yet.
 
 ## 1. What it is
 
@@ -39,18 +40,51 @@ logins, but only if root has a key in `authorized_keys` and you logged in with i
 the VPS host keys: replace `<host>` and save them as the GitHub secret `VPS_KNOWN_HOSTS`. Setting up
 the `ci` user's keys (`shipit setup --ci-key <name> <key file>`) comes with CI support.
 
-Each repo has a `shipit.ini` at its root:
+Each repo has a `shipit.ini` at its root. A static site (for now the only type `deploy` takes):
 
 ```ini
 [site]
-name = blog
-domain = blog.example.com
-type = nextjs        ; static | node | nextjs
-env = DATABASE_URL   ; must exist in the site's env file on the server
+name = docs                ; must match the name you deploy it as
+domain = docs.example.com
+alias = www.docs.example.com   ; optional, repeatable: redirected (308) to domain
+type = static              ; static | node | nextjs
+env = PUBLIC_API_URL       ; optional, repeatable: must exist in the site's env file
+
+[static]
+root = dist                ; the folder Caddy serves, after the build
+
+[node]                     ; optional: the defaults are picked from the repo
+install = npm ci           ; default by lockfile: npm ci, pnpm install --frozen-lockfile, yarn install --immutable
+build = npm run build      ; default: npm run build if package.json has a build script
 ```
 
-Secrets live only on the server, in `/etc/shipit/sites/<name>.env`. The GitHub Actions workflow and
-every `shipit.ini` key are in [docs/plan.md](docs/plan.md) (sections 3 and 5.4).
+Deploying a site:
+
+```bash
+# first deploy: the repo URL and the site's name
+ssh root@vps shipit deploy https://github.com/me/docs docs
+# later: by name, optionally with a branch, tag or full commit SHA (default: the repo's default branch)
+ssh root@vps shipit deploy docs
+ssh root@vps shipit deploy docs v1.2.0
+```
+
+- **Private repos.** If the repo can't be fetched anonymously over HTTPS, the first deploy creates a
+  deploy key for the site, prints it and stops: add it at
+  `https://github.com/<owner>/<repo>/settings/keys/new` (read-only), then run the same command
+  again. GitHub's host keys ship with shipit, so the connection is checked strictly.
+- **Secrets.** Put them in `/etc/shipit/sites/<name>.env` (`root:root`, mode 600): `KEY=value`
+  lines, blank lines and `#` comments; a value may be wrapped in one pair of quotes, and nothing else
+  is expanded. Only the build step gets them (on stdin), never the install step. A deploy fails,
+  naming them, if keys listed as `site.env` are missing.
+- **What a deploy does.** As the site's build user it fetches the repo, checks `shipit.ini`
+  (name, type, and that no other site uses the domain or aliases), builds a new
+  `releases/<UTC time>-<sha>/` folder, refuses it if `static.root` is missing or links outside
+  itself, switches `current` to it (the old one becomes `previous`), writes the site's Caddy file
+  and reloads Caddy if it changed, and deletes older releases. A failed build changes nothing; a
+  Caddy file that doesn't validate switches back.
+
+Secrets live only on the server. The GitHub Actions workflow and every `shipit.ini` key are in
+[docs/plan.md](docs/plan.md) (sections 3 and 5.4).
 
 ## 3. Philosophy
 

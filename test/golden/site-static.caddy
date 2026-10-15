@@ -1,0 +1,33 @@
+# managed by shipit: the Caddy file of the site blog. shipit deploy and rollback write it from the
+# shipit.ini of the release /srv/blog/current points at; edits here are lost.
+
+# The site's access log, shared by its own block and its alias redirects.
+(shipit-blog-log) {
+	log {
+		output file /var/log/shipit/blog/access.log {
+			roll_size 10MiB
+			roll_keep 10
+		}
+		# Query strings can carry tokens, so they're cut from the logged URI, and from the Referer and
+		# Location headers, which can repeat them.
+		format filter {
+			request>uri regexp \?.*$ ""
+			request>headers>Referer regexp \?.*$ ""
+			resp_headers>Location regexp \?.*$ ""
+		}
+	}
+}
+
+# blog.example.com serves the folder dist of the current release.
+blog.example.com {
+	import shipit-blog-log
+	root * /srv/blog/current/dist
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options SAMEORIGIN
+		-Server
+	}
+	file_server
+}
