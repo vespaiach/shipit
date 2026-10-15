@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2016,SC2034,SC2030,SC2031,SC2153 # single-quoted stub bodies; tests set lib variables, each in its own @test subshell
+# shellcheck disable=SC2016,SC2034,SC2030,SC2031,SC2153,SC2154 # single-quoted stub bodies; tests set lib variables, each in its own @test subshell; deploy_helpers.bash sets calls, remote, golden...
 # lib/deploy.sh (plan §5.2): the site Caddy file and unit against golden files, the small parsers and
 # checks deploy uses, the health check and restart, and whole deploys of static, node and Next.js
 # sites in a temp root: git runs for real against a local repo (the build user's ~/.gitconfig points
@@ -9,18 +9,9 @@ bats_require_minimum_version 1.5.0
 
 setup() {
   load helpers
-  load_common
-  # shellcheck source=lib/deploy.sh
-  . "$REPO_ROOT/lib/deploy.sh"
-  golden=$REPO_ROOT/test/golden
-  tpl=$REPO_ROOT/templates
-  CADDY_ETC=$BATS_TEST_TMPDIR/caddy
-  LOG_ROOT=$BATS_TEST_TMPDIR/log
-  SYSTEMD_DIR=$BATS_TEST_TMPDIR/systemd
-  mkdir -p "$SHIPIT_ETC/sites" "$CADDY_ETC/sites" "$LOG_ROOT" "$SYSTEMD_DIR"
+  load deploy_helpers
+  deploy_setup
 }
-
-need_envsubst() { command -v envsubst >/dev/null || skip "envsubst (gettext-base) isn't installed"; }
 
 # ---- The site Caddy file -------------------------------------------------------------------------
 
@@ -391,17 +382,6 @@ EOF
 
 # ---- Health check and restart --------------------------------------------------------------------
 
-# curl_codes <code>...: a curl stub answering the codes in turn (the last one from then on), logging
-# its arguments to $calls. 000 exits 7, as curl does when nothing answers.
-curl_codes() {
-  calls=${calls:-$BATS_TEST_TMPDIR/calls}
-  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/codes"
-  stub curl 'echo "curl $*" >>"'"$calls"'"; f="'"$BATS_TEST_TMPDIR"'/codes"
-    code=$(head -n 1 "$f")
-    if [ "$(wc -l <"$f")" -gt 1 ]; then tail -n +2 "$f" >"$f.t"; cat "$f.t" >"$f"; fi
-    printf %s "$code"; [ "$code" != 000 ] || exit 7'
-}
-
 # health_values: what site_health_check reads; it polls without waiting, for up to 5 s.
 health_values() {
   SITE=blog CONF_PORT=3000 INI_DOMAIN=blog.example.com INI_HEALTH=/ INI_HEALTH_STRICT=''
@@ -477,96 +457,8 @@ health_values() {
 }
 
 # ---- Whole deploys in a temp root ----------------------------------------------------------------
-
-# host: stubs the host commands (each appends its arguments to $calls), keeps a fake passwd that
-# useradd writes and getent reads, and makes a local repo ($remote) that https://github.com/me/blog
-# points at for the build user's git.
-host() {
-  command -v flock >/dev/null || skip "flock (util-linux) isn't installed"
-  command -v jq >/dev/null || skip "jq isn't installed"
-  need_envsubst
-  atomic_mv
-  calls=$BATS_TEST_TMPDIR/calls passwd=$BATS_TEST_TMPDIR/passwd
-  : >"$calls"
-  : >"$passwd"
-  local cmd
-  for cmd in chown setfacl systemctl caddy systemd-analyze; do
-    stub "$cmd" 'echo "'"$cmd"' $*" >>"'"$calls"'"'
-  done
-  # The health check answers 200 (curl_codes changes that), at once: one try, no waiting.
-  curl_codes 200
-  HEALTH_TIMEOUT=0 HEALTH_INTERVAL=0
-  stub getent '[ "$1" = passwd ] && grep "^$2:" "'"$passwd"'" || exit 2'
-  stub useradd 'echo "useradd $*" >>"'"$calls"'"
-    for a; do name=$a; done
-    while [ $# -gt 0 ]; do [ "$1" = --comment ] && c=$2; shift; done
-    echo "$name:x:999:999:$c:/nonexistent:/usr/sbin/nologin" >>"'"$passwd"'"'
-  # runuser runs the command as the current user.
-  stub runuser 'echo "runuser $1 $2" >>"'"$calls"'"; while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
-  BUILD_PATH=$BATS_TEST_TMPDIR/stubs:$PATH
-  remote=$BATS_TEST_TMPDIR/remote
-  git init -q -b main "$remote"
-  site_gitconfig url."$remote".insteadOf https://github.com/me/blog
-  commit shipit.ini "$(ini blog blog.example.com)" dist/index.html hello >/dev/null
-}
-
-# site_gitconfig <key> <value>: sets a key in the build user's ~/.gitconfig.
-site_gitconfig() {
-  mkdir -p "$SRV_ROOT/blog/home"
-  git config -f "$SRV_ROOT/blog/home/.gitconfig" "$1" "$2"
-}
-
-# ini <name> <domain> [line]...: a static shipit.ini, serving dist.
-ini() {
-  local name=$1 domain=$2
-  shift 2
-  printf '[site]\n\tname = %s\n\tdomain = %s\n\ttype = static\n' "$name" "$domain"
-  printf '\t%s\n' "$@"
-  printf '[static]\n\troot = dist\n'
-}
-
-# commit <path> <content>...: writes the files in $remote, commits and prints the SHA.
-commit() {
-  (
-    cd "$remote" || exit 1
-    while [ "$#" -gt 0 ]; do
-      mkdir -p "$(dirname "$1")"
-      printf '%s\n' "$2" >"$1"
-      shift 2
-    done
-    git add -A
-    git -c user.name=t -c user.email=t@example.com commit -q -m change
-    git rev-parse HEAD
-  )
-}
-
-# node_ini <start> [site line]...: a node shipit.ini for blog.example.com.
-node_ini() {
-  local start=$1
-  shift
-  printf '[site]\n\tname = blog\n\tdomain = blog.example.com\n\ttype = node\n'
-  printf '\t%s\n' "$@"
-  printf '[node]\n\tstart = %s\n' "$start"
-}
-
-# unit, caddy_file: the installed unit and Caddy file, with the temp root's paths put back.
-unit() {
-  local u
-  u=$(<"$SYSTEMD_DIR/shipit-blog.service")
-  u=${u//$SRV_ROOT//srv}
-  printf '%s\n' "${u//$SHIPIT_ETC//etc/shipit}"
-}
-caddy_file() {
-  local c
-  c=$(<"$CADDY_ETC/sites/blog.caddy")
-  c=${c//$SRV_ROOT//srv}
-  printf '%s\n' "${c//$LOG_ROOT//var/log/shipit}"
-}
-
-current() { readlink "$SRV_ROOT/blog/current"; }
-previous() { readlink "$SRV_ROOT/blog/previous"; }
-releases() { ls "$SRV_ROOT/blog/releases"; }
-pins() { git -C "$SRV_ROOT/blog/repo.git" for-each-ref --format='%(refname)' refs/shipit/; }
+# The harness (host, commit, ini, node_ini, unit, caddy_file, current, previous, ...) is in
+# deploy_helpers.bash.
 
 @test "first deploy of a static site: users, folders, release, links, Caddy file, conf" {
   host
@@ -585,7 +477,7 @@ pins() { git -C "$SRV_ROOT/blog/repo.git" for-each-ref --format='%(refname)' ref
   [ "$(pins)" = "refs/shipit/$sha" ]
 
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy writes this file)
+# managed by shipit (shipit deploy and rollback write this file)
 REPO=https://github.com/me/blog
 TYPE=static
 DOMAIN=blog.example.com
@@ -761,7 +653,7 @@ EOF
   [[ $output == *"Gave blog the port 3000."* ]]
   [ "$(current)" = "releases/$rel" ]
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy writes this file)
+# managed by shipit (shipit deploy and rollback write this file)
 REPO=https://github.com/me/blog
 TYPE=node
 DOMAIN=blog.example.com
@@ -891,7 +783,7 @@ EOF
   [ "$(grep -c 'systemctl reload caddy' "$calls")" -eq 2 ]
   # The users and the conf (REPO and the port) are kept.
   diff "$SHIPIT_ETC/sites/blog.conf" - <<'EOF'
-# managed by shipit (shipit deploy writes this file)
+# managed by shipit (shipit deploy and rollback write this file)
 REPO=https://github.com/me/blog
 PORT=3000
 EOF
@@ -1118,7 +1010,7 @@ EOF
   wait "$first"
   wait "$second"
   [ "$(cat "$order")" = $'start\nend\nstart\nend' ]
-  grep -qx 'Another deploy of blog is running; waiting.' "$BATS_TEST_TMPDIR/out2"
+  grep -qx 'Another deploy or rollback of blog is running; waiting.' "$BATS_TEST_TMPDIR/out2"
   run ! grep -q waiting "$BATS_TEST_TMPDIR/out1"
   [ "$(releases | wc -l | tr -d ' ')" -eq 2 ]
 }

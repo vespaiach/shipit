@@ -2,8 +2,8 @@
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
 > milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser), M2 (`shipit setup`), M3
-> (`shipit deploy` for static sites) and M4 (Node and Next.js deploys) are done. `rollback` (M5) and
-> `setup --ci-key` (M6) aren't implemented yet.
+> (`shipit deploy` for static sites), M4 (Node and Next.js deploys) and M5 (`shipit rollback`) are
+> done. `setup --ci-key` and `shipit remote` (M6) aren't implemented yet.
 
 ## 1. What it is
 
@@ -122,6 +122,28 @@ ssh root@vps shipit deploy docs v1.2.0
   backed up.
 - **Logs.** `journalctl -u shipit-<name>` (app output), `tail -f /var/log/shipit/<name>/access.log |
   jq` (requests), `journalctl -u caddy` (TLS and proxy errors).
+
+Rolling back a site:
+
+```bash
+ssh root@vps shipit rollback docs
+```
+
+- **What it does.** Swaps `current` and `previous`, then writes the Caddy file and unit from the
+  `shipit.ini` of the release that's now live (so a changed `static.root`, alias or `data.dir` goes
+  back too), checking its domains against the other sites as they are now. Node/Next.js sites are
+  restarted (Next.js's cache emptied) and health-checked as on a deploy. It prints "Rolled back
+  <name>: now serving <release>."
+- **One step.** It goes back exactly one release; running it again returns to where you started.
+  Both releases are kept; the next deploy drops whichever one is then `previous`. A site with only
+  one release has nothing to roll back to, and rollback says so.
+- **Code and config, not data.** `/var/lib/shipit-<name>` and the env file are untouched, so schema
+  changes must work with the previous release.
+- **If it fails** (the older release's config is refused, or it doesn't pass the health check), it
+  swaps back, restores the config, restarts the release that was live, and exits non-zero: "Rollback
+  failed health check; still serving <release>."
+- It waits for a deploy or rollback of the same site that's already running. It still works after a
+  force-push and `git gc`: each release's commit is pinned in the site's `repo.git`.
 
 Secrets live only on the server. The GitHub Actions workflow and every `shipit.ini` key are in
 [docs/plan.md](docs/plan.md) (sections 3 and 5.4).

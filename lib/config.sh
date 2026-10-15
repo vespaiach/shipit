@@ -395,7 +395,7 @@ site_conf_write() {
   check_site_name "$1" || return 1
   tmp=$(mktemp "$SHIPIT_ETC/sites/.$1.conf.XXXXXX") || return 1
   {
-    printf '# managed by shipit (shipit deploy writes this file)\n'
+    printf '# managed by shipit (shipit deploy and rollback write this file)\n'
     printf 'REPO=%s\n' "$CONF_REPO"
     [ -z "$CONF_TYPE" ] || printf 'TYPE=%s\n' "$CONF_TYPE"
     [ -z "$CONF_DOMAIN" ] || printf 'DOMAIN=%s\n' "$CONF_DOMAIN"
