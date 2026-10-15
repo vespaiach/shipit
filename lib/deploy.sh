@@ -21,20 +21,24 @@ DEPLOY_USAGE='Usage: shipit deploy <name> [ref], or shipit deploy <repo-url> <na
 # A release folder's name: <UTC time>-<full sha>. The time sorts lexically.
 RELEASE_RE='^[0-9]{8}T[0-9]{6}Z-([0-9a-f]{40})$'
 
-# Run as <name>-build (or by root, to check the file, with `true` as the command): reads the env file's
-# KEY=value lines on stdin, exports them, then runs the command with stdin from /dev/null. Blank lines
-# and lines starting with # or ; are skipped. The value is literal, except that spaces and tabs around
-# it, then one pair of matching quotes around all of it, are removed (as systemd's EnvironmentFile=
-# does; no escapes). $0 is the file's name, for messages.
+# Run as <name>-build, never by root (root checks the file with env_file_check): reads the env file's
+# KEY=value lines on stdin, exports them, then runs the command with stdin from /dev/null. The command
+# is looked up before anything is exported, so a PATH in the file can't change which program starts
+# (the program itself sees it). Blank lines and lines starting with # or ; are skipped. The value is
+# literal, except that spaces and tabs around it, then one pair of matching quotes around all of it,
+# are removed (as systemd's EnvironmentFile= does; no escapes). $0 is the file's name, for messages.
 # shellcheck disable=SC2016,SC1003 # expanded by sh, not here; '\'' is a quote inside the script
-ENV_EXEC='n=0
+ENV_EXEC='cmd=$(command -v "$1") || { echo "$1: command not found" >&2; exit 127; }
+shift
+set -- "$cmd" "$@"
+_shipit_n=0
 while IFS= read -r line || [ -n "$line" ]; do
-  n=$((n + 1))
+  _shipit_n=$((_shipit_n + 1))
   case $line in "" | "#"* | ";"*) continue ;; esac
   key=${line%%=*}
   case $key in
     "$line" | "" | [0-9]* | *[!A-Za-z0-9_]*)
-      echo "Line $n of $0 isn'\''t KEY=value (KEY: letters, digits and _, not starting with a digit)." >&2
+      echo "Line $_shipit_n of $0 isn'\''t KEY=value (KEY: letters, digits and _, not starting with a digit)." >&2
       exit 1
       ;;
   esac
@@ -45,6 +49,19 @@ while IFS= read -r line || [ -n "$line" ]; do
   export "$key=$value"
 done
 exec "$@" </dev/null'
+
+# env_file_check <file>: the env file has only blank lines, lines starting with # or ;, and KEY=value
+# lines, as ENV_EXEC reads them. It only parses: nothing in the file is exported or run.
+env_file_check() {
+  local line n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case $line in "" | "#"* | ";"*) continue ;; esac
+    [[ $line =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && continue
+    err "Line $n of $1 isn't KEY=value (KEY: letters, digits and _, not starting with a digit)."
+    return 1
+  done <"$1"
+}
 
 # Run as <name>-build: runs the command line $2 with sh, in the folder $1.
 # shellcheck disable=SC2016 # expanded by sh, not here
@@ -268,10 +285,14 @@ render_site_caddy() {
   done
 }
 
-# site_caddy_check <file>: validates the site's Caddy file as caddy (validating opens the log file,
-# plan §5.1 step 4).
+# site_caddy_check <file>: the installed Caddy file, if any, is shipit's, and the new one passes caddy
+# validate, run as caddy (validating opens the log file, plan §5.1 step 4).
 site_caddy_check() {
-  local out
+  local dest=$CADDY_ETC/sites/$SITE.caddy out
+  if [ -e "$dest" ] && ! is_shipit_file "$dest"; then
+    err "$dest wasn't written by shipit, so it wasn't replaced. Move it away, then run the deploy again."
+    return 1
+  fi
   chmod 644 "$1"
   if ! out=$(runuser -u caddy -- caddy validate --config "$1" --adapter caddyfile 2>&1); then
     err "$out"
@@ -573,8 +594,7 @@ deploy_fetch() {
   [ "$first" = yes ] || ini_check_type "$CONF_TYPE" || exit 1
   ini_check_clash "$SITE" || exit 1
   if [ -e "$env" ]; then
-    # shellcheck disable=SC2094 # $0 is only the file's name, for messages
-    sh -c "$ENV_EXEC" "$env" true <"$env" || die "Fix $env, then run the deploy again."
+    env_file_check "$env" || die "Fix $env, then run the deploy again."
   fi
   missing=$(missing_env_keys "$env" "${INI_ENV[@]}")
   if [ -n "$missing" ]; then
@@ -771,6 +791,8 @@ cmd_deploy() {
   # caddy validates the site's Caddy file from here as the caddy user. Nothing in it is secret.
   chmod 755 "$DEPLOY_TMP"
 
+  # The name form of an unknown site is refused before the lock, so it leaves no lock file behind.
+  [ -n "$URL" ] || [ -e "$SHIPIT_ETC/sites/$SITE.conf" ] || site_conf_read "$SITE" || exit 1
   site_lock
   deploy_resolve
   deploy_access

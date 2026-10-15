@@ -70,6 +70,7 @@ node_releases() {
   run cmd_rollback blog
   [ "$status" -eq 1 ]
   [ "$output" = "There's no site named blog. Deploy it first with: shipit deploy <repo-url> blog" ]
+  [ ! -e "$SHIPIT_VAR/blog.lock" ]
   [ ! -s "$calls" ]
 }
 

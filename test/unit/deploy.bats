@@ -260,7 +260,18 @@ EOF
   [ "$output" = '[a b][ a ][end]' ]
 }
 
-@test "ENV_EXEC refuses a line that isn't KEY=value, naming it" {
+@test "ENV_EXEC looks the command up before exporting, so a PATH in the file can't change it" {
+  fake=$BATS_TEST_TMPDIR/fake
+  mkdir -p "$fake"
+  printf '#!/bin/sh\necho fake\n' >"$fake/sh"
+  chmod +x "$fake/sh"
+  run sh -c "$ENV_EXEC" blog.env sh -c 'printf "%s|%s" "$PATH" "$A"' <<<"PATH=$fake"$'\nA=1'
+  [ "$status" -eq 0 ]
+  [ "$output" = "$fake|1" ]
+}
+
+@test "ENV_EXEC and env_file_check refuse a line that isn't KEY=value, naming it" {
+  f=$BATS_TEST_TMPDIR/blog.env
   for line in ' A=1' '1A=x' 'A-B=x' 'no equals' '=x' 'export A=1'; do
     run sh -c "$ENV_EXEC" /etc/shipit/sites/blog.env true <<<$'OK=1\n'"$line"
     [ "$status" -eq 1 ] || {
@@ -268,7 +279,27 @@ EOF
       return 1
     }
     [[ $output == "Line 2 of /etc/shipit/sites/blog.env isn't KEY=value"* ]]
+    printf 'OK=1\n%s\n' "$line" >"$f"
+    run --separate-stderr env_file_check "$f"
+    [ "$status" -eq 1 ] || {
+      echo "env_file_check accepted: $line"
+      return 1
+    }
+    [ "$stderr" = "Line 2 of $f isn't KEY=value (KEY: letters, digits and _, not starting with a digit)." ]
   done
+}
+
+@test "env_file_check accepts what ENV_EXEC reads, and exports and runs nothing" {
+  f=$BATS_TEST_TMPDIR/blog.env
+  printf '# c\n; c\n\nPATH=/nonexistent\nLD_PRELOAD=x\nA_1="q"\nB=a=b\nT=end' >"$f"
+  path=$PATH
+  run env_file_check "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  env_file_check "$f"
+  [ "$PATH" = "$path" ]
+  [ -z "${LD_PRELOAD-}" ]
+  [ -z "${A_1-}" ]
 }
 
 # ---- Releases and symlinks -----------------------------------------------------------------------
@@ -402,11 +433,12 @@ health_values() {
 
 @test "site_health_check fails when the site answers 500 until the timeout" {
   health_values
-  HEALTH_TIMEOUT=1 HEALTH_INTERVAL=0.2
+  # SECONDS counts whole seconds, so a 1 s timeout can end after one try; 2 s always allows several.
+  HEALTH_TIMEOUT=2 HEALTH_INTERVAL=0.2
   curl_codes 500
   run --separate-stderr site_health_check
   [ "$status" -eq 1 ]
-  [ "$stderr" = 'http://127.0.0.1:3000/ (Host: blog.example.com) answered 500 within 1 s; it needs a status below 500. Check: journalctl -u shipit-blog' ]
+  [ "$stderr" = 'http://127.0.0.1:3000/ (Host: blog.example.com) answered 500 within 2 s; it needs a status below 500. Check: journalctl -u shipit-blog' ]
   [ "$(grep -c . "$calls")" -gt 1 ]
 }
 
@@ -583,6 +615,7 @@ EOF
   [ "$status" -eq 1 ]
   [ "$output" = "There's no site named blog. Deploy it first with: shipit deploy <repo-url> blog" ]
   [ ! -e "$SHIPIT_ETC/sites/blog.conf" ]
+  [ ! -e "$SHIPIT_VAR/blog.lock" ]
   [ ! -s "$calls" ]
 }
 
@@ -810,6 +843,17 @@ EOF
   run ! grep -q '^systemctl' "$calls"
 }
 
+@test "a site Caddy file shipit didn't write is refused before anything is installed" {
+  host
+  echo 'blog.example.com { respond "mine" }' >"$CADDY_ETC/sites/blog.caddy"
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 1 ]
+  [[ $output == *"$CADDY_ETC/sites/blog.caddy wasn't written by shipit, so it wasn't replaced. Move it away, then run the deploy again."* ]]
+  [ "${lines[-1]}" = "First deploy of blog failed; nothing is served." ]
+  [ "$(cat "$CADDY_ETC/sites/blog.caddy")" = 'blog.example.com { respond "mine" }' ]
+  run ! grep -q '^systemctl\|^caddy' "$calls"
+}
+
 @test "a user named like the site that shipit didn't make is refused before anything changes" {
   host
   echo 'blog-build:x:1000:1000:Someone:/home/blog:/bin/bash' >"$passwd"
@@ -870,6 +914,16 @@ EOF
   [ "$status" -eq 1 ]
   [ "${lines[-1]}" = "$SHIPIT_ETC/sites/blog.env is missing B, C, which site.env in shipit.ini needs. Add them as KEY=value lines, then run the deploy again." ]
   [ -z "$(releases)" ]
+}
+
+@test "an env file setting PATH and LD_PRELOAD passes root's check without affecting it" {
+  host
+  printf 'PATH=/nonexistent\nLD_PRELOAD=x\n' >"$SHIPIT_ETC/sites/blog.env"
+  run cmd_deploy https://github.com/me/blog blog
+  [ "$status" -eq 0 ] || {
+    echo "$output"
+    return 1
+  }
 }
 
 @test "a broken env file stops the deploy before the build" {
