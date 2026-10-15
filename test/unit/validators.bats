@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
-# check_domain and check_port (syntax only; clashes with other sites come with lib/config.sh), and
-# health_ok.
+# check_domain and check_port (syntax only; clashes with other sites come with lib/config.sh), health_ok
+# and check_env_key.
 
 setup() {
   load helpers
@@ -61,7 +61,7 @@ setup() {
 
 # ---- Health --------------------------------------------------------------------------------------
 
-@test "health: without site.health, any answer below 500 counts" {
+@test "health: any answer below 500 counts" {
   local code
   for code in 200 204 301 308 401 404 499; do
     run health_ok "$code"
@@ -79,15 +79,25 @@ setup() {
   done
 }
 
-@test "health: with site.health set, only exactly 200 counts" {
-  run health_ok 200 1
-  [ "$status" -eq 0 ]
-  local code
-  for code in 201 204 301 308 404 500 000; do
-    run health_ok "$code" 1
-    [ "$status" -eq 1 ] || {
-      echo "accepted $code"
+# ---- Environment variable names --------------------------------------------------------------------
+
+@test "env key: letters, digits and _, not starting with a digit" {
+  . "$REPO_ROOT/lib/config.sh"
+  local k
+  for k in DATABASE_URL _x a1 A; do
+    run check_env_key "$k"
+    [ "$status" -eq 0 ] && [ -z "$output" ] || {
+      echo "refused $k"
       return 1
     }
   done
+  for k in '' 1A A-B 'A B' /q 'A=b' $'A\nB'; do
+    run check_env_key "$k"
+    [ "$status" -eq 1 ] || {
+      echo "accepted $k"
+      return 1
+    }
+  done
+  run check_env_key 1A
+  [ "$output" = "Invalid name '1A': use letters, digits and _, not starting with a digit." ]
 }

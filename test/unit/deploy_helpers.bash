@@ -4,8 +4,11 @@
 # its paths in $BATS_TEST_TMPDIR, host commands stubbed, git run for real against a local repo that the
 # build user's ~/.gitconfig puts in place of https://github.com/me/blog.
 
-# deploy_setup: sources lib/common.sh and lib/deploy.sh and points their paths at the temp dir.
+# deploy_setup: sources lib/common.sh and lib/deploy.sh and points their paths at the temp dir. stdin is
+# /dev/null, as without a terminal, so a first deploy never waits for answers; a test that wants to
+# answer the prompts redirects the command's stdin itself.
 deploy_setup() {
+  exec </dev/null
   load_common
   # shellcheck source=lib/deploy.sh
   . "$REPO_ROOT/lib/deploy.sh"
@@ -31,8 +34,8 @@ curl_codes() {
 }
 
 # host: stubs the host commands (each appends its arguments to $calls), keeps a fake passwd that
-# useradd writes and getent reads, and makes a local repo ($remote) that https://github.com/me/blog
-# points at for the build user's git.
+# useradd writes and getent reads, writes the site's shipit.ini (put_ini), and makes a local repo
+# ($remote) that https://github.com/me/blog points at for the build user's git.
 host() {
   command -v flock >/dev/null || skip "flock (util-linux) isn't installed"
   command -v jq >/dev/null || skip "jq isn't installed"
@@ -59,7 +62,15 @@ host() {
   remote=$BATS_TEST_TMPDIR/remote
   git init -q -b main "$remote"
   site_gitconfig url."$remote".insteadOf https://github.com/me/blog
-  commit shipit.ini "$(ini blog.example.com)" dist/index.html hello >/dev/null
+  put_ini "$(ini blog.example.com)"
+  commit dist/index.html hello >/dev/null
+}
+
+# put_ini <content>: writes the site's shipit.ini, /srv/blog/config/shipit.ini (the server's file, never the
+# repo's). A later deploy picks up what a test writes here between deploys.
+put_ini() {
+  mkdir -p "$SRV_ROOT/blog/config"
+  printf '%s\n' "$1" >"$SRV_ROOT/blog/config/shipit.ini"
 }
 
 # site_gitconfig <key> <value>: sets a key in the build user's ~/.gitconfig.
@@ -118,4 +129,3 @@ caddy_file() {
 current() { readlink "$SRV_ROOT/blog/current"; }
 previous() { readlink "$SRV_ROOT/blog/previous"; }
 releases() { ls "$SRV_ROOT/blog/releases"; }
-pins() { git -C "$SRV_ROOT/blog/repo.git" for-each-ref --format='%(refname)' refs/shipit/; }

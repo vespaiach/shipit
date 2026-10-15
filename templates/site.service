@@ -1,5 +1,5 @@
-# managed by shipit: the systemd unit of the site ${SITE}. shipit deploy and rollback write it from the
-# shipit.ini of the release ${SRV_ROOT}/${SITE}/current points at; edits here are lost.
+# managed by shipit: the systemd unit of the site ${SITE}. shipit deploy writes it from the site's
+# shipit.ini (${SRV_ROOT}/${SITE}/config/shipit.ini); edits here are lost.
 [Unit]
 Description=shipit site ${SITE}
 After=network.target

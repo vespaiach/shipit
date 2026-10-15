@@ -72,16 +72,11 @@ check_port() {
 
 # ---- Health checks -------------------------------------------------------------------------------
 
-# health_ok <status code> [strict]: strict (site.health set) needs exactly 200. Otherwise any answer
-# below 500 counts, because many sites redirect / to a login page. 000 means no answer at all.
+# health_ok <status code>: any answer below 500 counts, because many sites redirect / to a login page.
+# 000 means no answer at all.
 health_ok() {
   local LC_ALL=C
-  [[ $1 =~ ^[1-5][0-9][0-9]$ ]] || return 1
-  if [ -n "${2-}" ]; then
-    [ "$1" = 200 ]
-  else
-    [ "$1" -lt 500 ]
-  fi
+  [[ $1 =~ ^[1-4][0-9][0-9]$ ]]
 }
 
 # ---- Users ---------------------------------------------------------------------------------------

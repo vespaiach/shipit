@@ -1,11 +1,12 @@
 # shellcheck shell=bash
-# shipit.ini reading and validation (git config, plan §3), and reading and writing the site configs in
-# $SHIPIT_ETC/sites/<name>.conf (plan §4). Sourcing this file only defines constants and functions.
+# A site's shipit.ini (plan §3): reading and validating it with git config, and asking for it on the
+# first deploy; and reading and writing the site configs in $SHIPIT_ETC/sites/<name>.conf (plan §4).
+# Sourcing this file only defines constants and functions.
 # Needs lib/common.sh (err, check_domain, check_port).
 
 # The keys shipit.ini may contain (plan §3), and those that may repeat.
-INI_KEYS=(site.domain site.alias site.type site.health site.env node.install node.build
-  node.start static.root data.dir)
+INI_KEYS=(site.domain site.alias site.type site.env node.install node.build node.start static.root
+  data.dir)
 INI_MULTI_KEYS=(site.alias site.env data.dir)
 
 # nextjs's node.start default: `next` isn't on the unit's PATH (plan §3).
@@ -50,6 +51,15 @@ check_repo_url() {
   return 1
 }
 
+# check_env_key <name>: an environment variable name, as in the env file (plan §4): letters, digits and
+# _, not starting with a digit.
+check_env_key() {
+  local LC_ALL=C
+  [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && return 0
+  err "Invalid name '$1': use letters, digits and _, not starting with a digit."
+  return 1
+}
+
 # repo_slug <url>: prints <owner>/<repo> (without .git) from a URL check_repo_url accepted.
 repo_slug() {
   local path=${1#https://github.com/}
@@ -84,11 +94,6 @@ ini_value_ok() {
         static | node | nextjs) return 0 ;;
       esac
       err "Invalid site.type '$v' in shipit.ini: use static, node or nextjs."
-      return 1
-      ;;
-    site.health)
-      [[ $v =~ ^/[A-Za-z0-9._~/-]*$ ]] && return 0
-      err "Invalid site.health '$v' in shipit.ini: use a path starting with /, made of letters, digits and . _ ~ / -."
       return 1
       ;;
     site.env)
@@ -127,19 +132,16 @@ ini_value_ok() {
 # --list`; it's never sourced. On success it sets:
 #   INI_DOMAIN INI_TYPE           site.domain, site.type
 #   INI_ALIASES INI_ENV INI_DIRS  arrays: site.alias, site.env, data.dir
-#   INI_HEALTH                    site.health, default /
-#   INI_HEALTH_STRICT             1 if site.health was set (health_ok's strict mode), else empty
 #   INI_INSTALL INI_BUILD         node.install, node.build; empty = use the default, which needs the
 #                                 repo (lockfile, package.json) and is picked by the build step
 #   INI_START                     node.start; for nextjs defaults to INI_NEXTJS_START
 #   INI_ROOT                      static.root
 # On failure it prints why and returns 1.
-# shellcheck disable=SC2034 # INI_HEALTH_STRICT, INI_INSTALL and INI_BUILD are read by deploy
+# shellcheck disable=SC2034 # INI_INSTALL and INI_BUILD are read by deploy
 ini_load() {
   local LC_ALL=C file=$1 out entry key value k bad=() pairs=() line=''
   local -A count=()
-  INI_DOMAIN='' INI_TYPE='' INI_HEALTH='' INI_HEALTH_STRICT=''
-  INI_INSTALL='' INI_BUILD='' INI_START='' INI_ROOT=''
+  INI_DOMAIN='' INI_TYPE='' INI_INSTALL='' INI_BUILD='' INI_START='' INI_ROOT=''
   INI_ALIASES=() INI_ENV=() INI_DIRS=()
 
   if ! out=$(git config -f "$file" --no-includes --list 2>&1 >/dev/null); then
@@ -171,7 +173,7 @@ ini_load() {
     in_list "$key" "${INI_KEYS[@]}" || bad+=("$key")
   done
   if [ "${#bad[@]}" -gt 0 ]; then
-    err "shipit.ini has unknown keys: ${bad[*]}. Use only site.domain, site.alias, site.type, site.health, site.env, node.install, node.build, node.start, static.root and data.dir."
+    err "shipit.ini has unknown keys: ${bad[*]}. Use only site.domain, site.alias, site.type, site.env, node.install, node.build, node.start, static.root and data.dir."
     return 1
   fi
 
@@ -202,7 +204,6 @@ ini_load() {
       site.domain) INI_DOMAIN=$value ;;
       site.alias) INI_ALIASES+=("$value") ;;
       site.type) INI_TYPE=$value ;;
-      site.health) INI_HEALTH=$value INI_HEALTH_STRICT=1 ;;
       site.env) INI_ENV+=("$value") ;;
       node.install) INI_INSTALL=$value ;;
       node.build) INI_BUILD=$value ;;
@@ -231,7 +232,7 @@ ini_load() {
         err "A static site needs static.root in shipit.ini."
         return 1
       fi
-      for key in node.start site.health data.dir; do
+      for key in node.start data.dir; do
         if [ -n "${count[$key]-}" ]; then
           err "$key isn't allowed for a static site: there's no process to run."
           return 1
@@ -252,7 +253,69 @@ ini_load() {
       fi
       ;;
   esac
-  [ -n "$INI_HEALTH" ] || INI_HEALTH=/
+}
+
+# ini_question <prompt> <key> [optional]: asks on stderr, one line from stdin, until ini_value_ok accepts
+# it, then prints the answer. With "optional" a blank answer is accepted and prints nothing. Returns 1
+# at the end of input.
+ini_question() {
+  local LC_ALL=C prompt=$1 key=$2 optional=${3-} answer
+  while :; do
+    printf '%s ' "$prompt" >&2
+    if ! read -r answer && [ -z "$answer" ]; then
+      err ''
+      return 1
+    fi
+    if [ -z "$answer" ] && [ -n "$optional" ]; then
+      return 0
+    fi
+    if [[ $answer == *[[:cntrl:]]* ]]; then
+      err "$key in shipit.ini contains a control character (such as a newline or tab), which isn't allowed."
+      continue
+    fi
+    if ini_value_ok "$key" "$answer"; then
+      printf '%s\n' "$answer"
+      return 0
+    fi
+  done
+}
+
+# ini_ask <out file>: asks for a site's shipit.ini on stdin (plan §5.2 A.2b): domain, type, then
+# static.root, or node.build, node.start and data sub-folders (node and nextjs). Every answer is checked as
+# ini_load will check it; a blank answer to an optional question leaves the key out. The file is written
+# with git config only once everything is answered, so it's never left half-made. Returns 1 at the end of
+# input.
+ini_ask() {
+  local out=$1 type domain root='' build='' start='' dir prompt
+  local -a dirs=()
+  domain=$(ini_question 'Domain (for example blog.example.com):' site.domain) || return 1
+  type=$(ini_question 'Site type (static, node or nextjs):' site.type) || return 1
+  if [ "$type" = static ]; then
+    root=$(ini_question 'Folder Caddy serves, inside the release (for example dist):' static.root) || return 1
+  else
+    build=$(ini_question 'Build command (Enter for the default):' node.build optional) || return 1
+    # shellcheck disable=SC2016 # $PORT is for the user to read, not expanded here
+    if [ "$type" = nextjs ]; then
+      start=$(ini_question 'Start command; it must listen on $PORT (for example node server.js; Enter for the default):' node.start optional) || return 1
+    else
+      start=$(ini_question 'Start command; it must listen on $PORT (for example node server.js):' node.start) || return 1
+    fi
+    prompt='Data sub-folder the site can write to, kept across deploys (for example uploads; Enter for none):'
+    while :; do
+      dir=$(ini_question "$prompt" data.dir optional) || return 1
+      [ -n "$dir" ] || break
+      in_list "$dir" "${dirs[@]}" || dirs+=("$dir")
+      prompt='Another data sub-folder (Enter when done):'
+    done
+  fi
+  git config -f "$out" site.domain "$domain" \
+    && git config -f "$out" site.type "$type" \
+    && { [ -z "$root" ] || git config -f "$out" static.root "$root"; } \
+    && { [ -z "$build" ] || git config -f "$out" node.build "$build"; } \
+    && { [ -z "$start" ] || git config -f "$out" node.start "$start"; } || return 1
+  for dir in "${dirs[@]}"; do
+    git config -f "$out" --add data.dir "$dir" || return 1
+  done
 }
 
 # ini_check_type <deployed type>: site.type can't change after the first deploy (decision 15).
@@ -381,7 +444,7 @@ site_conf_write() {
   check_site_name "$1" || return 1
   tmp=$(mktemp "$SHIPIT_ETC/sites/.$1.conf.XXXXXX") || return 1
   {
-    printf '# managed by shipit (shipit deploy and rollback write this file)\n'
+    printf '# managed by shipit (shipit deploy writes this file)\n'
     printf 'REPO=%s\n' "$CONF_REPO"
     [ -z "$CONF_TYPE" ] || printf 'TYPE=%s\n' "$CONF_TYPE"
     [ -z "$CONF_DOMAIN" ] || printf 'DOMAIN=%s\n' "$CONF_DOMAIN"
