@@ -2,8 +2,8 @@
 
 > **Status:** shipit 1.0.0 is being rebuilt from [docs/plan.md](docs/plan.md) (the spec), one
 > milestone at a time; M0 (skeleton), M1 (`shipit.ini` parser), M2 (`shipit setup`), M3
-> (`shipit deploy` for static sites), M4 (Node and Next.js deploys) and M5 (`shipit rollback`) are
-> done. `setup --ci-key` and `shipit remote` (M6) aren't implemented yet.
+> (`shipit deploy` for static sites), M4 (Node and Next.js deploys), M5 (`shipit rollback`) and M6
+> (deploys and rollbacks from GitHub Actions: `setup --ci-key`, the `ci` user) are done.
 
 ## 1. What it is
 
@@ -26,7 +26,7 @@ ssh root@vps shipit setup
 # first deploy of a site, by hand
 ssh root@vps shipit deploy https://github.com/<you>/blog blog
 
-# later: from CI (ci@vps), or by hand
+# later: by hand, or from CI (section "Deploying from GitHub Actions")
 ssh root@vps shipit deploy blog [ref]
 ssh root@vps shipit rollback blog
 ```
@@ -37,8 +37,9 @@ below (the Node.js LTS major is looked up once and kept in `/etc/shipit/host.con
 pinned corepack, creates shipit's folders, writes `/etc/caddy/Caddyfile`, turns on ufw (SSH ports
 from `sshd -T`, 80, 443/tcp, 443/udp), fail2ban and unattended-upgrades, and turns off SSH password
 logins, but only if root has a key in `authorized_keys` and you logged in with it. Its last lines are
-the VPS host keys: replace `<host>` and save them as the GitHub secret `VPS_KNOWN_HOSTS`. Setting up
-the `ci` user's keys (`shipit setup --ci-key <name> <key file>`) comes with CI support.
+the VPS host keys: replace `<host>` and save them as the GitHub secret `VPS_KNOWN_HOSTS`. It also
+creates the `ci` user (and its one sudoers rule) that GitHub Actions logs in as; `--ci-key` adds a
+site's CI key (below).
 
 Each repo has a `shipit.ini` at its root. A static site:
 
@@ -145,8 +146,34 @@ ssh root@vps shipit rollback docs
 - It waits for a deploy or rollback of the same site that's already running. It still works after a
   force-push and `git gc`: each release's commit is pinned in the site's `repo.git`.
 
-Secrets live only on the server. The GitHub Actions workflow and every `shipit.ini` key are in
-[docs/plan.md](docs/plan.md) (sections 3 and 5.4).
+Deploying from GitHub Actions:
+
+1. Deploy the site once by hand (above). CI only redeploys and rolls back sites that have been
+   deployed successfully.
+2. Make a key pair for the site, on your laptop, without a passphrase:
+   `ssh-keygen -t ed25519 -N '' -C 'shipit ci blog' -f ~/.ssh/shipit_blog_ci`.
+3. Give the public half to the VPS (re-run setup for each site; other sites' keys are kept):
+   `ssh root@vps 'shipit setup --ci-key blog -' < ~/.ssh/shipit_blog_ci.pub`. The file must be the
+   one line `ssh-keygen` wrote (ed25519, ECDSA, security-key or RSA), without options. Several sites
+   at once: `shipit setup --ci-key blog blog.pub --ci-key api api.pub`.
+4. Add the repo's secrets (Settings, Secrets and variables, Actions): `SHIPIT_KEY` (the private key,
+   `~/.ssh/shipit_blog_ci`), `VPS_KNOWN_HOSTS` (the lines setup printed, with `<host>` replaced),
+   `VPS_HOST` (the address CI connects to) and, if SSH isn't on 22, `VPS_PORT`.
+5. Copy [examples/deploy.yml](examples/deploy.yml) (deploys every push to `main`) and
+   [examples/rollback.yml](examples/rollback.yml) (run by hand from the Actions tab) to the repo's
+   `.github/workflows/`, replacing `blog` with the site's name.
+
+- **What the key can do.** It logs in as `ci` and can only run `deploy <name> [<commit sha or
+  branch>]` or `rollback <name>` for its own site: the line in `/home/ci/.ssh/authorized_keys` forces
+  `sudo shipit remote <name>`, which checks the command strictly and refuses everything else
+  (another site, options, shell syntax, an interactive login).
+- **Output and exit status.** The build streams to the Actions log, and the step fails when the
+  deploy or rollback does.
+- **A new key for a site** replaces its old one: run step 3 again. To revoke a key, delete its line
+  (ending in `shipit:<name>`) from `/home/ci/.ssh/authorized_keys`.
+
+Secrets live only on the server. Every `shipit.ini` key is in [docs/plan.md](docs/plan.md)
+(section 3); why the workflows look as they do is in section 5.4.
 
 ## 3. Philosophy
 
@@ -201,7 +228,7 @@ Neither site user can read the env file: systemd reads it as root and passes it 
 | Site types | `static`, `node`, `nextjs` |
 | Source | GitHub, public or private (per-site deploy key) |
 | Processes | systemd, one unit per site |
-| Also installed | git, jq, curl, ufw, fail2ban, unattended-upgrades, acl |
+| Also installed | git, jq, curl, ufw, fail2ban, unattended-upgrades, acl, sudo |
 
 ## 7. Limitations
 

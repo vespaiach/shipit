@@ -41,6 +41,7 @@ Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state fol
 | `ufw` | Firewall: allow the ports sshd listens on (5.1 step 5), 80/tcp, 443/tcp and 443/udp (HTTP/3); deny the rest. |
 | `unattended-upgrades` | Automatic security updates. |
 | `fail2ban` | Bans IPs that brute-force SSH (`sshd` jail with `backend = systemd`: Debian 13 has no `/var/log/auth.log`). |
+| `sudo` | The `ci` user runs `shipit remote` through one sudoers rule; `visudo` checks it (5.1 step 6). Minimal images may lack it. |
 | (already present) `util-linux` (`flock`), `systemd` | Locks, services. |
 
 ## 3. Repo config: `shipit.ini`
@@ -248,7 +249,8 @@ Users (each site gets two system accounts, neither can log in):
 - `<name>` (system, no login) runs a Node/Next.js site's process; it reads the release, writes nothing there.
 - `ci` (login by SSH key only, forced command) can trigger `deploy` and `rollback` and nothing else;
   each key is tied to one site (5.1 step 6). Its login shell is `/bin/sh`, because sshd runs the forced
-  command through it; the key can't choose another command.
+  command through it; the key can't choose another command. A system user (GECOS `shipit ci`), with
+  password field `*` and a root-owned home `/home/ci` (decision 63).
 - Root runs `shipit` (directly, or via `sudo` for `ci`).
 
 ## 5. Commands
@@ -266,8 +268,9 @@ Idempotent: re-running changes no file whose content is already right.
    `/etc/apt/preferences.d/shipit-nodejs` pins `nodejs` to NodeSource. A source file shipit didn't
    write is left alone, with a message. The NodeSource line uses NODE_MAJOR from `host.conf`, written
    on the first run. The npm install is skipped when `corepack --version` already prints the pin.
-3. Create `ci` (shell `/bin/sh`); create `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`,
-   `/srv`, `/var/log/shipit` (root:root, 0755).
+3. Create `ci` (shell `/bin/sh`; on every run, with or without `--ci-key`, decision 63); create
+   `/etc/shipit/sites`, `/etc/caddy/sites`, `/var/lib/shipit`, `/srv`, `/var/log/shipit` (root:root,
+   0755). An existing `ci` user that shipit didn't create stops setup.
 4. Write `/etc/caddy/Caddyfile` (`import /etc/caddy/sites/*.caddy`), validate, reload Caddy (only if
    it changed). Caddy files are always validated as `caddy` (`runuser -u caddy -- caddy validate`):
    validating opens the log files, and run as root it would create them owned by root, breaking the
@@ -287,6 +290,8 @@ Idempotent: re-running changes no file whose content is already right.
    `visudo -cf` on a temp copy first): `ci ALL=(root) NOPASSWD: /usr/local/bin/shipit remote *` plus
    `Defaults:ci env_keep += SSH_ORIGINAL_COMMAND`. The wildcard is safe because a `ci` key can't run
    anything but its forced command, which fixes the arguments, and `remote` validates them.
+   The sudoers file is written on every run; `authorized_keys` only when `--ci-key` is given. Every
+   `--ci-key` is parsed and its key checked before setup changes anything (decision 62).
 7. SSH hardening: write `/etc/ssh/sshd_config.d/10-shipit.conf` (`PasswordAuthentication no`,
    `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`), check it with `sshd -t`,
    install, `systemctl reload ssh`. Done **only** if root has a key in `authorized_keys` and the current
@@ -435,6 +440,25 @@ SQLite migrations, must stay compatible with the previous release for one versio
 equal the key's `<name>`, so a site's key can't act on another site. Only sites that have completed a
 deploy (no first deploys from CI). Anything else: refused.
 
+- The whole string must match one pattern: words separated by single spaces, no leading or trailing
+  whitespace, the ref made only of letters, digits and `. _ / -` and then passing `check_ref`
+  (decision 64). Tabs, newlines, quotes and shell syntax never match. Refused: "Refused the command
+  <quoted command>. This key can only run: deploy <name> [<commit sha or branch>], or rollback
+  <name>." An empty command (an interactive login) says "No command given." before the same list.
+- Another site's name: "This key belongs to the site <name>, so it can't deploy or roll back <other>."
+  This is checked before the site config is read.
+- A site without TYPE: "<name> has never been deployed successfully. Its first deploy must be run by
+  hand, as root: shipit deploy <repo-url> <name>"; an unknown site gets 5.2 A.1's message.
+- `shipit remote` itself takes exactly one valid name; anything else prints "Usage: shipit remote
+  <name>. Only the ci user's SSH keys run it, as their forced command."
+- The command runs in the same root process (`cmd_deploy <name> [ref]` or `cmd_rollback <name>`,
+  decision 65), never with a URL.
+- `$SSH_ORIGINAL_COMMAND` is the only value shipit reads from the environment. It's input, parsed as
+  above, not a setting.
+
+The two workflows below are also in `examples/deploy.yml` and `examples/rollback.yml` (a unit test
+keeps them identical to this section).
+
 GitHub secrets (per repo):
 - `SHIPIT_KEY`: this site's CI private key (its public half was given to `setup --ci-key <name>`).
 - `VPS_KNOWN_HOSTS`: the known_hosts lines `setup` printed, with `<host>` replaced.
@@ -549,7 +573,8 @@ name, which only root sets and the build user can't rename, and the commit is pi
   `/etc/systemd/system/shipit-<name>.service`.
 - `sshd.conf` (the drop-in), `sudoers-ci`, `authorized_keys` line (one per site key),
   `fail2ban-sshd.conf` (the jail drop-in), `github_known_hosts` (GitHub's SSH host keys, copied, not
-  rendered).
+  rendered). The `authorized_keys` template is one key line, so it has no marker; setup writes the
+  marker as the file's first line (decision 66).
 - `apt-caddy.list`, `apt-nodesource.list` (NODE_MAJOR), `apt-nodejs.pref` (the NodeSource pin),
   `apt-auto-upgrades` (unattended-upgrades on).
 
@@ -570,6 +595,7 @@ lib/deploy.sh        resolve → build → switch → prune
 lib/rollback.sh
 lib/remote.sh
 templates/
+examples/            deploy.yml, rollback.yml (the workflows of 5.4)
 install.sh
 test/unit/*.bats, test/golden/, test/fixtures/   (make: lint + bats, CI unchanged)
 ```
@@ -589,7 +615,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | M3 | `deploy` static (done) | bats (golden `site-static.caddy` with the `log` block; URL form with a REPO that differs from the registered one refused; renamed `site.name` refused; domain/alias clash on a later deploy refused; a changed `site.type` refused; two concurrent deploys of one site run one after the other) |
 | M4 | `deploy` node / nextjs + health check + auto-revert + data folder (done) | bats (golden `site-proxy.caddy` and `site.service`) |
 | M5 | `rollback` (done) | bats (static, node and nextjs rollbacks re-render from the previous release's `shipit.ini`; rolling back twice returns to the start; a failed health check or a domain clash swaps back; a held site lock makes rollback wait; the previous release's `shipit.ini` is still readable after a force-push and `git gc --prune=now`) |
-| M6 | `remote` + CI user + GitHub Actions example | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
+| M6 | `remote` + CI user + GitHub Actions example (done) | bats (command parsing: site A's key can't deploy or roll back site B, a ref like `--upload-pack=x` is refused; a `--ci-key` file with two lines or key options is refused) |
 | M7 | README, CLAUDE.md rewritten | review |
 
 ## 9. Decisions
@@ -657,3 +683,8 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. |
 | 60 | Rollback's swap order | **`previous` → old `current` first, then `current` → old `previous`**, as deploy's C.1 orders them. A crash in between leaves `current` and the config rendered from it unchanged (the site keeps serving what it served), with both links on the same release; rollback treats a `previous` equal to `current` as no `previous`. The other order would leave `current` on the older release with the newer release's config until something re-rendered it. Going back after a failure uses the same order. |
 | 61 | Waiting for the site lock | **One message for deploy and rollback: "Another deploy or rollback of <name> is running; waiting."** The waiting command can't know which of the two holds the lock. |
+| 62 | `--ci-key` input | **Parsed and checked before anything changes** (even before the OS check), so a bad key leaves the VPS as it was. Only `--ci-key <name> <file \| ->` pairs; anything else prints "Usage: shipit setup [--ci-key <name> <public key file \| ->]...". A site may be given once per run, and only one key may come from stdin (`-`). The file must be one line (one trailing newline allowed; any second line, even an empty one, is refused) matching `^<type> <base64>( <printable ASCII>)?$`, with `<type>` one of `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`, `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` and `ssh-rsa` (accepted: older CI setups still use RSA keys, and `ssh-keygen -l` checks the key itself), and `<base64>` `[A-Za-z0-9+/]+={0,2}`. Anything before the type (options such as `restrict` or `command="..."`) doesn't match. Only `<type> <base64>` is kept: written to a temp file, it must pass `ssh-keygen -l -f`, and it's what goes into the line; the user's comment is dropped and `shipit:<name>` takes its place. |
+| 63 | The `ci` user | **Created by every `setup` run**, so adding a key later only touches `authorized_keys`: `useradd --system --user-group --no-create-home --home-dir /home/ci --shell /bin/sh --password '*' --comment 'shipit ci' ci`. It's shipit's when its GECOS is exactly `shipit ci` (as decision 36); any other `ci` user stops setup. Password field `*`: no password matches it, and unlike `!` sshd doesn't treat it as locked when `UsePAM` is off, so key logins work either way. `/home/ci` and `/home/ci/.ssh` are `root:root` 0755 and `authorized_keys` `root:root` 0644 (sshd's `StrictModes` accepts root-owned files): ci owns nothing, so even code running as ci couldn't change its forced commands, and root never writes into a folder another user controls. `/etc/sudoers.d/shipit-ci` (0440) is also written on every run, checked with `visudo -cqf` on the temp copy (with `-f`, visudo doesn't check owner or mode). Seams: `CI_HOME` and `SUDOERS_DIR` in `lib/common.sh`; `SHIPIT_BIN` (`/usr/local/bin/shipit`, where install.sh links it) is a plain constant in `lib/setup.sh`. |
+| 64 | Parsing `$SSH_ORIGINAL_COMMAND` | **One anchored pattern per command**: `^deploy ([a-z][a-z0-9-]*)( ([A-Za-z0-9._/-]+))?$` or `^rollback ([a-z][a-z0-9-]*)$`, then the name must equal the key's and the ref must pass `check_ref` (so `-x` and `--upload-pack=x` are refused, and so is anything git's ref rules refuse). The ref's characters are a subset of what `check_ref` allows, so a branch with other characters can be deployed by hand but not from CI; CI passes `$GITHUB_SHA` anyway. A refused command is echoed with bash's `${cmd@Q}`, so control characters can't reach the CI log raw. |
+| 65 | How `remote` runs the command | **In the same process**: `lib/remote.sh` sources `lib/rollback.sh` (and through it `lib/deploy.sh`) and calls `cmd_deploy <name> [ref]` or `cmd_rollback <name>`, as the dispatcher would. One root process, no second argument parsing, and the arguments passed are the validated ones. |
+| 66 | `authorized_keys` updates | **Rendered line by line, merged, installed through `install_if_changed` (0644)**: the first line is the marker `# managed by shipit: one line per site, written by shipit setup --ci-key <name> <key>.`; a line ending in ` shipit:<name>` is that site's and is replaced in place (a new site's line goes last); every other line, including ones added by hand, is kept as it was. An existing `authorized_keys` without the marker stops setup. Re-running with the same key changes nothing. |
