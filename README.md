@@ -6,11 +6,12 @@ each of them from its GitHub repo:
 - `shipit setup` installs Caddy, Node.js LTS and a few tools, and hardens SSH and the firewall.
 - `shipit deploy` builds a site from GitHub on the VPS and switches to it atomically.
 - `shipit rollback` goes back one release.
+- `shipit delete` deletes a site, after you type its name.
 
 Sites can be `static` (Caddy serves a folder), `node` (any server listening on `$PORT`) or `nextjs`.
 Caddy is the web server for all of them and gets their TLS certificates automatically. Only a site's
-first deploy asks questions (its config and its secrets); every other command works over SSH from a
-laptop, with no terminal.
+first deploy asks questions (its config and its secrets), and `delete` asks you to confirm; every
+other command works over SSH from a laptop, with no terminal.
 
 [docs/plan.md](docs/plan.md) is the full spec, with the reasons behind each choice. This README is the
 manual.
@@ -26,7 +27,7 @@ manual.
 7. [Rolling back](#rolling-back)
 8. [Logs](#logs)
 9. [Server layout and security](#server-layout-and-security)
-10. [Removing a site](#removing-a-site)
+10. [Deleting a site](#deleting-a-site)
 11. [Limitations](#limitations)
 13. [Development](#development)
 
@@ -217,7 +218,7 @@ the problem and run the same command again, without answering again.
 
 A site's name is the one you gave on its first deploy (`shipit deploy <repo-url> <name>`); `shipit.ini`
 doesn't hold it, it's in the file's path. The name and the type can't change after that. To rename it
-or change its type, remove it ([Removing a site](#removing-a-site)) and deploy it again.
+or change its type, delete it ([Deleting a site](#deleting-a-site)) and deploy it again.
 
 ### The first deploy's questions
 
@@ -426,22 +427,30 @@ Sites are isolated from each other: separate users, code, data and ports. Every
 before it's installed. **Anyone who can push to a site's deployed branch runs code on the VPS** as
 `<name>-build`, and the build sees that site's secrets: deploy only repos you trust.
 
-## Removing a site
-
-There's no command for it. As root, for a site `<name>`:
+## Deleting a site
 
 ```bash
-systemctl disable --now shipit-<name>        # node/nextjs only
-rm -f /etc/systemd/system/shipit-<name>.service && systemctl daemon-reload
-rm -f /etc/caddy/sites/<name>.caddy && systemctl reload caddy
-rm -rf /srv/<name> /var/cache/shipit-<name> /var/log/shipit/<name>
-rm -f /etc/shipit/sites/<name>.conf /etc/shipit/sites/<name>.env /var/lib/shipit/<name>.lock
-userdel <name>-build && userdel <name>
-rm -rf /var/lib/shipit-<name>                # the site's data: see below
+ssh -t root@vps shipit delete docs
 ```
 
-**Warning: deleting `/var/lib/shipit-<name>` deletes the site's data**, and shipit keeps no backup.
-Copy it somewhere first if you may need it.
+It says what goes and asks you to type the site's name (exactly; anything else deletes nothing):
+
+```
+This deletes the site docs (docs.example.com): its releases, repo, shipit.ini, env file, Caddy file, unit, cache and logs, and the users docs and docs-build. It can't be undone.
+Type docs to delete it:
+```
+
+- **Everything goes**: the Caddy file (Caddy is reloaded), the unit (stopped and disabled),
+  `/srv/<name>`, `/etc/shipit/sites/<name>.conf` and `.env`, `/var/cache/shipit-<name>`,
+  `/var/log/shipit/<name>`, and the users `<name>` and `<name>-build`.
+- **Data too.** **`/var/lib/shipit-<name>`, the site's data, is deleted**, and shipit keeps no backup;
+  the prompt names it when it exists. Copy it somewhere first if you may need it.
+- **Without a terminal** it refuses, unless you pipe the name: `echo docs | ssh root@vps shipit delete docs`.
+- It waits for a deploy or rollback of the site that's running. If it stops half-way, run it again:
+  the site's `.conf` goes last, so it's still known. A Caddy file or unit shipit didn't write, or a
+  user it didn't create, is left alone and named. The empty lock file `/var/lib/shipit/<name>.lock` is
+  kept on purpose.
+- A private repo's deploy key is on GitHub, out of shipit's reach: it prints the link to remove it.
 
 ## Limitations
 
@@ -449,8 +458,8 @@ Copy it somewhere first if you may need it.
 - One Node.js version for every site, fixed when `setup` first runs.
 - Rollback goes back one release only, and never touches data.
 - A node/Next.js deploy restarts the process (a 1–3 s gap). No blue/green.
-- No backups, no command to remove a site, and a site's name and type can't change after its first
-  deploy.
+- No backups, and a site's name and type can't change after its first deploy (delete it and deploy
+  again).
 - Repos come from GitHub only (`https://github.com/<owner>/<repo>`).
 - A private npm registry that needs a token at install time isn't supported.
 

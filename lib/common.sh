@@ -22,6 +22,10 @@ SYSTEMD_DIR=/etc/systemd/system
 # systemd's CacheDirectory= root: a Next.js release's .next/cache links to $CACHE_ROOT/shipit-<name>.
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 CACHE_ROOT=/var/cache
+# systemd's StateDirectory= root: a node/nextjs site's data is $STATE_ROOT/shipit-<name> (only delete
+# touches it).
+# shellcheck disable=SC2034 # used by the command libraries that source this file
+STATE_ROOT=/var/lib
 # Host files setup reads or writes (plan §5.1).
 # shellcheck disable=SC2034 # used by the command libraries that source this file
 OS_RELEASE=/etc/os-release

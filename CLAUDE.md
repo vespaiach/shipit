@@ -1,14 +1,14 @@
 # CLAUDE.md
 
 shipit (1.0.0) is a bash tool that sets up a Debian 13+ or Ubuntu 26.04+ VPS (`shipit setup`), deploys
-static, Node and Next.js sites from GitHub onto it (`shipit deploy`) and goes back one release
-(`shipit rollback`), by hand as root.
+static, Node and Next.js sites from GitHub onto it (`shipit deploy`), goes back one release
+(`shipit rollback`) and deletes a site (`shipit delete`), by hand as root.
 **docs/plan.md is the spec**: read it before changing anything, and keep it, README.md (the user
 manual) and this file in step with the code.
 
 ## Layout
 
-- `bin/shipit` — dispatcher. Checks the command (`setup | deploy | rollback | help`), prints
+- `bin/shipit` — dispatcher. Checks the command (`setup | deploy | rollback | delete | help`), prints
   usage for `help` or no command, refuses non-root (except `help`), sources `lib/common.sh` and
   `lib/<command>.sh`, and calls `cmd_<command> "$@"`. A new command needs its library, an entry in the `case` and, if
   public, a line in `usage`.
@@ -47,6 +47,9 @@ manual) and this file in step with the code.
   `BUILD_PATH`, `HEALTH_TIMEOUT`, `HEALTH_INTERVAL`, `HEALTH_MAX_TIME`.
 - `lib/rollback.sh` (sources `deploy.sh`, reusing its state globals and helpers) — plan §5.3; it never
   reads or applies `shipit.ini`: `rollback_args`, `rollback_links` (previous first, decision 60), `rollback_revert`, `cmd_rollback`.
+- `lib/delete.sh` (sources `deploy.sh`) — plan §5.6: `delete_args`, `delete_confirm` (type the name;
+  before the lock), `delete_caddy`, `delete_user`, `cmd_delete` (`<name>.conf` last, so a rerun
+  finishes; the lock file stays).
 - `templates/` — what `render` fills in (plan §6): `Caddyfile`, `sshd.conf`, `fail2ban-sshd.conf`,
   `apt-caddy.list`, `apt-nodesource.list`,
   `apt-nodejs.pref`, `apt-auto-upgrades`; a site's Caddy file in parts (`site-log.caddy` with the
@@ -55,9 +58,9 @@ manual) and this file in step with the code.
   `site-nextjs.service`). `github_known_hosts` is copied data, used by git's ssh as is.
 - `install.sh` — copies `bin lib templates` to `/usr/local/lib/shipit`, links `/usr/local/bin/shipit`.
 - `test/unit/` — bats: one `.bats` per library or concern (`dispatcher`, `validators`, `render`,
-  `files`, `locks`, `config`, `setup`, `deploy`, `rollback`). `helpers.bash` (sources
+  `files`, `locks`, `config`, `setup`, `deploy`, `rollback`, `delete`). `helpers.bash` (sources
   `common.sh` with paths in a temp dir; `stub`; `atomic_mv`) and `deploy_helpers.bash` (the temp-root
-  harness for `deploy.bats` and `rollback.bats`: `deploy_setup_file` (the shared host-command stubs, written once per file in `setup_file`),
+  harness for `deploy.bats`, `rollback.bats` and `delete.bats`: `deploy_setup_file` (the shared host-command stubs, written once per file in `setup_file`),
   `deploy_setup`, `host`, `put_ini` (the site's server file), `commit`, `ini`, `node_ini`, `curl_codes`, ...). `test/golden/` holds expected rendered output; `test/fixtures/` the `shipit.ini`
   cases, SSH keys, an sshd journal, a Node release index and a `render` template.
 - `Makefile`, `.github/workflows/check.yml` (CI runs `make`).
@@ -69,18 +72,18 @@ manual) and this file in step with the code.
 - **Libraries are side-effect free when sourced**: only constants and functions. Tests source them.
 - **Test seams are plain constants**, never read from the environment, never flags; tests reassign
   them after sourcing. In `lib/common.sh`: `SHIPIT_ETC`, `SHIPIT_VAR`, `SRV_ROOT`, `CADDY_ETC`,
-  `LOG_ROOT`, `SYSTEMD_DIR`, `CACHE_ROOT`, `OS_RELEASE`, `APT_ETC`, `SSH_ETC`, `FAIL2BAN_ETC`,
+  `LOG_ROOT`, `SYSTEMD_DIR`, `CACHE_ROOT`, `STATE_ROOT`, `OS_RELEASE`, `APT_ETC`, `SSH_ETC`, `FAIL2BAN_ETC`,
   `ROOT_HOME`, `SHIPIT_TEMPLATES`. In `lib/deploy.sh`: `BUILD_PATH` and the
   `HEALTH_*` timings. Lock helpers take the lock path.
 - **Call commands by name** (no absolute paths, no `$EUID`): tests stub `id`, `mv`, `chown`,
-  `setfacl`, `useradd`, `getent`, `runuser`, `systemctl`, `systemd-analyze`, `caddy`, `curl`, `gpg`,
+  `setfacl`, `useradd`, `userdel`, `pkill`, `getent`, `runuser`, `systemctl`, `systemd-analyze`, `caddy`, `curl`, `gpg`,
   `apt-get`, `apt-config`, `dpkg-query`, `npm`, `corepack`, `ufw`, `sshd`, `journalctl` and
   `ssh` through `PATH`. Deploy tests run git for real: the `runuser` stub runs commands as the test
   user, `BUILD_PATH` gets the stubs prepended, and `url.<local repo>.insteadOf` in the build user's
   `~/.gitconfig` (`$SRV_ROOT/<name>/home`) stands in for GitHub.
 - **No environment input.** shipit reads nothing from the environment; repo commands run under `env -i`.
-  The only input is the first deploy's prompts (`ini_ask`, `env_ask`): lines from stdin, prompts on
-  stderr, so every `as_build` call before them passes `</dev/null` and nothing else reads stdin.
+  The only input is the first deploy's prompts (`ini_ask`, `env_ask`) and delete's confirmation
+  (`delete_confirm`): lines from stdin, prompts on stderr, so every `as_build` call before them passes `</dev/null` and nothing else reads stdin.
 - **Validators** are `check_<thing> <value>`: silent on success, print the reason to stderr and return
   1 on failure. Validate every value from `shipit.ini`, a site `.conf`, `host.conf` or the command line
   before using it. Every `shipit.ini` key has its own pattern; control characters are never allowed.

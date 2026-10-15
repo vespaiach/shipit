@@ -1,12 +1,13 @@
 # shipit — plan
 
-A small bash tool that does three things:
+A small bash tool that does four things:
 
 1. `shipit setup` — prepare a VPS for atomic, symlink-based deploys.
 2. `shipit deploy <name> [ref]` (or `<repo-url> <name> [ref]`) — build a website from GitHub and switch to it.
 3. `shipit rollback <name>` — go back exactly one version.
+4. `shipit delete <name>` — delete a site and its data, after asking (5.6).
 
-Every command runs by hand over SSH, and only a site's first deploy asks questions (`ssh -t`, or piped
+Every command runs by hand over SSH, and only a site's first deploy and `delete` ask questions (`ssh -t`, or piped
 answers; decision 69). Several sites share one VPS.
 
 Out of scope (dropped from the old tool): PostgreSQL, backups/restore, state folders,
@@ -182,7 +183,7 @@ a token at install time isn't supported.
 /var/log/shipit/                      root:root, 0755 (setup)
 /var/log/shipit/<name>/access.log     Caddy access log; folder caddy:caddy, 0750; rolled by Caddy
 /var/lib/shipit/build.lock            one build at a time on the VPS
-/var/lib/shipit/<name>.lock           site lock, held for the whole deploy (A–D) and the whole rollback
+/var/lib/shipit/<name>.lock           site lock, held for the whole deploy (A–D), rollback and delete
 ```
 
 `<name>.conf` describes what the last deploy applied (rollback doesn't change it). It is `KEY=value` lines (`ALIASES` space-separated), blank lines and `#` comments; it's
@@ -485,6 +486,38 @@ the last deploy applied. Two consequences, documented rather than engineered aro
   which may not have it (404). Put `static.root` back and deploy the old ref instead. Rollback doesn't
   re-run the static symlink and ACL checks against a different root.
 
+### 5.6 `shipit delete <name>`
+
+Deletes a site and everything shipit keeps for it (decision 70).
+
+1. Refused, changing nothing: anything but exactly one valid name ("Usage: shipit delete <name>"); an
+   unknown site (the message of 5.2 A.1), before asking and before the lock.
+2. Confirm, before the site lock (so a deploy isn't held up while the admin types): print on stderr
+   "This deletes the site <name> (<domain>): its releases, repo, shipit.ini, env file, Caddy file,
+   unit, cache and logs, and the users <name> and <name>-build. It can't be undone." (` (<domain>)` only
+   if the site has one; when `/var/lib/shipit-<name>` exists, the sentence ends ", and its data in
+   /var/lib/shipit-<name>. It can't be undone, and shipit keeps no backup: copy the data first if you
+   may need it."), then ask `Type <name> to delete it:` and read one line from stdin. Only the exact
+   name goes on (no spaces stripped). No input: "Nothing was deleted: there was no answer. Run it in a
+   terminal (ssh -t), or pipe the name: echo <name> | shipit delete <name>". Any other answer:
+   "Nothing was deleted: the answer wasn't <name>."
+3. Under the site lock (the same wait message as deploy and rollback), in this order: delete
+   `/etc/caddy/sites/<name>.caddy` and reload Caddy ("Deleted <file> and reloaded Caddy."); stop,
+   disable and delete the unit, then `daemon-reload` (`site_unit_remove`); `pkill -KILL -u` both site
+   users (`userdel` refuses a user with processes); `rm -rf` `/srv/<name>`, `/var/lib/shipit-<name>`,
+   `/var/cache/shipit-<name>`, `/var/log/shipit/<name>` and `/etc/shipit/sites/<name>.env`; `userdel
+   <name>-build`, then `userdel <name>` (which removes group `<name>`, the build user's primary group);
+   last, `<name>.conf`. A Caddy file or unit without the marker, or a user whose GECOS isn't shipit's
+   (decision 36), is left alone with "<file> wasn't written by shipit, so it was left alone." / "The
+   user <user> wasn't created by shipit, so it was left alone."
+4. Print "Deleted <name>." If the site had a deploy key, also "Remove its deploy key from GitHub too:
+   https://github.com/<owner>/<repo>/settings/keys".
+
+`<name>.conf` goes last, so a delete that stops half-way (a failed `rm` or `userdel`) still knows the
+site, and running it again finishes the job: every step skips what's already gone. The lock file
+`/var/lib/shipit/<name>.lock` stays (empty): a deploy already waiting on it would otherwise hold a lock
+on a deleted file while a new command makes a new one, and both would run.
+
 ## 6. Templates
 
 - `Caddyfile` — global options, `import /etc/caddy/sites/*.caddy`.
@@ -522,13 +555,14 @@ Each template gets a golden file and a unit test (kept from the old tool).
 ## 7. Code layout
 
 ```
-bin/shipit           dispatcher: setup | deploy | rollback | help
+bin/shipit           dispatcher: setup | deploy | rollback | delete | help
 lib/common.sh        log/err/die, validators, locks, render, install_if_changed, atomic_link, health_ok
 lib/config.sh        shipit.ini reading + validation (git config) and the first-deploy questions
                      (ini_ask), check_env_key, site .conf read/write
 lib/setup.sh
 lib/deploy.sh        resolve → ask (shipit.ini, env file) → build → switch → prune
 lib/rollback.sh
+lib/delete.sh        confirm → caddy → unit → folders → users → conf (5.6)
 templates/
 install.sh
 test/unit/*.bats, test/golden/, test/fixtures/   (make: lint + bats, CI unchanged)
@@ -564,7 +598,7 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 6 | First deploy | **By hand, as root**, like every other command. |
 | 7 | SSH hardening | **On**, guarded by the key-login check in 5.1 step 7. |
 | 8 | Downtime on Node/Next.js deploy | **Accepted**: a ~1–3 s gap while the unit restarts. No blue/green. |
-| 9 | Removing a site | **No command.** README documents the manual steps (stop/disable unit, remove Caddy file and reload, remove `/srv/<name>`, `/etc/shipit/sites/<name>.*`, `/var/lib/shipit-<name>`, `/var/cache/shipit-<name>`, `/var/log/shipit/<name>`, `/var/lib/shipit/<name>.lock`, the users `<name>` and `<name>-build`). Warning: deleting `/var/lib/shipit-<name>` deletes the site's data. |
+| 9 | Removing a site | **`shipit delete <name>`** (decision 70). It was "no command, README documents the manual steps" until then. |
 | 10 | Rewrite approach | **Fresh rewrite** on a new branch; keep the old tool's helpers listed in section 7. |
 | 11 | Who runs shipit | **Root.** Repo code only ever runs as `<name>-build` (build) or `<name>` (runtime). Running shipit itself as an unprivileged user was considered and rejected: it needs two privilege modes, an extra command and sudo rules for restarts anyway, and the CI path is already limited by the forced command plus strict `shipit remote` parsing. |
 | 12 | Site config format | **`shipit.ini`, in git's config dialect.** It allows comments, is easy to read, adds no dependency (`git` is already installed), and `git config` is a strict, well-specified parser that exits non-zero on bad syntax. Considered: JSON (no comments) and YAML (needs python3 + yq, has YAML 1.1 quirks, and is a bigger parser to run on untrusted input). The file lives on the server, not in the repo (decision 69). |
@@ -612,9 +646,10 @@ checks against other sites (5.2 A.3) use the site configs, so they come with `li
 | 56 | Health check | **`curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: <domain>" http://127.0.0.1:<port>/`, every second until `health_ok` accepts the status (anything below 500) or 60 s have passed** (`HEALTH_TIMEOUT`, `HEALTH_INTERVAL`, `HEALTH_MAX_TIME` in `lib/deploy.sh`; tests shorten them). Redirects aren't followed, so `/` redirecting to a login page passes. There's no custom path or strict mode (`site.health` was removed, decision 69). The type, domain and port come from `<name>.conf` (`CONF_*`), which deploy has just written and rollback and revert read, so none of them needs `shipit.ini`. On failure it prints the URL, the last status (or "gave no answer"), "it needs a status below 500" and `journalctl -u shipit-<name>`. `site_restart_and_check` (restart + health check) is shared by deploy, revert and rollback. |
 | 57 | What a failed first deploy keeps | **The users and `<name>.conf` with REPO and PORT**: TYPE, DOMAIN and ALIASES (written in C.2) are removed again, so the rerun is a first deploy (access probe, name check) and the domain isn't held. The unit is stopped, disabled and deleted (then `daemon-reload`), not only stopped and disabled, so no unit is left pointing at a missing `current`. |
 | 58 | Restart after a failed render | **The restored release is restarted and health-checked whatever made the deploy fail**, as C.4 says, even though a failed render never restarted the new one (a short gap); the config stays as the failed deploy left it. If that fails too, it's printed and the deploy (or rollback) still exits non-zero. |
-| 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. |
+| 59 | Test seams for M4 | **`SYSTEMD_DIR` (`/etc/systemd/system`) and `CACHE_ROOT` (`/var/cache`, the `.next/cache` link's target) in `lib/common.sh`.** No `STATE_ROOT`: shipit never touches `/var/lib/shipit-<name>`; systemd makes it. (Until `delete`, which deletes it: `STATE_ROOT`, `/var/lib`, decision 70.) |
 | 60 | Rollback's swap order | **`previous` → old `current` first, then `current` → old `previous`**, as deploy's C.1 orders them. A crash in between leaves `current` unchanged (the site keeps serving what it served), with both links on the same release; rollback treats a `previous` equal to `current` as no `previous`. The other order would leave both links on the older release, so the newer one would be unreachable and the next deploy would prune it. Going back after a failure uses the same order. |
 | 61 | Waiting for the site lock | **One message for deploy and rollback: "Another deploy or rollback of <name> is running; waiting."** The waiting command can't know which of the two holds the lock. |
 | 67 | No `site.name` in `shipit.ini` | **The name comes only from the command line** (`shipit deploy <repo-url> <name>`, then `shipit deploy <name>`), and `REPO` in `<name>.conf` ties it to its repo, so a `site.name` key said nothing new and could only disagree with it (and needed two refusal messages). It also finds the site's `config/shipit.ini` (decision 69). `site.name` is now an unknown key, refused like any other (decision 26), so a `shipit.ini` written for v1.0.0 fails with "shipit.ini has unknown keys: site.name. …" until the line is deleted. A breaking change for those files. |
 | 68 | CI deployment removed | **No `ci` user, no `shipit remote`, no `--ci-key`, no sudoers rule, no known_hosts output, no workflow examples.** Deploys and rollbacks are run by hand as root (over SSH if you like). Removed with it: decisions 16, 18 and 62–66, which only concerned CI. Numbers of the other decisions, setup steps (6 and 8 are now empty) and sections (5.4) are kept so references stay valid. An existing VPS keeps its `ci` user, `/etc/sudoers.d/shipit-ci` and `/home/ci/.ssh/authorized_keys`: setup no longer touches them, so remove them by hand (`userdel ci`, `rm /etc/sudoers.d/shipit-ci`, `rm -r /home/ci`). |
 | 69 | Site config on the server | **`shipit.ini` is `/srv/<name>/config/shipit.ini`** (root:root, mode 600, in a root-only `config/` of mode 00700), not in the repo. It is built by prompts on the site's first deploy (5.2 A.2b) and read by `deploy` only, on every deploy, so an edit takes effect on the next one; `deploy` and `rollback` already take `<name>`, so the command line is unchanged. The first deploy also offers to create `<name>.env` from `KEY=VALUE` prompts (5.2 A.2c). Rollback and revert never read, restore or apply it (5.5): they swap links, restart and health-check, with TYPE, DOMAIN and PORT from `<name>.conf`; so there's no per-release copy, and a config change is rolled forward by editing the file, not back. **`site.health` is removed**: the check always polls `/` and accepts a status below 500 (decision 56), which keeps a custom path and a strict mode out of `<name>.conf`. The pin `refs/shipit/<sha>`, which only kept a release's `shipit.ini` readable after a force-push, is gone with the repo copy. Version stays 1.0.0 and there is no import or fallback for the old layout: the server file is how 1.0.0 works. Rejected: keeping the repo file and copying it per release (the config would still travel with the code, and a rollback re-render could still fail); restoring the old config on rollback. Consequences: a deploy whose config breaks the site is reverted in code only; rolling back across a `static.root` change can leave Caddy serving a folder the older release lacks (5.5). |
+| 70 | Deleting a site | **`shipit delete <name>` deletes everything shipit made for the site, its data in `/var/lib/shipit-<name>` included, after the admin types the site's name** (5.6). Typing the name, not y/N, because Enter on a y/N habit would cost a site; piping it (`echo <name> \| shipit delete <name>`) keeps it scriptable, as the first deploy's answers are. No `--yes` flag (shipit takes no flags). It asks before taking the site lock, so a deploy isn't blocked by a prompt, and deletes `<name>.conf` last so a rerun finishes a half-done delete. Data is deleted too: keeping it would leave a `/var/lib/shipit-<name>` that a new site of the same name would inherit; the prompt names the folder and says to copy it first. Files without the marker and users without shipit's GECOS are left alone, as setup and deploy treat them. The lock file is kept (5.6). The deploy key on GitHub can't be removed from the VPS, so it's printed as a reminder. New seam: `STATE_ROOT` (`/var/lib`) in `lib/common.sh`; tests stub `userdel` and `pkill`. |
