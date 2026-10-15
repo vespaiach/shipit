@@ -5,13 +5,11 @@ set -euo pipefail
 # Installed as /usr/local/lib/shipit/bin/shipit (linked from /usr/local/bin), or run from a checkout.
 SHIPIT_LIB=$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)
 
-# `remote` isn't listed: only the ci user's forced command runs it (plan §5.4).
 usage() {
   cat <<'EOF'
 Usage: sudo shipit <command> [arguments]
 
-  setup [--ci-key <name> <public key file | ->]...
-                                     Prepare this VPS (safe to re-run)
+  setup                              Prepare this VPS (safe to re-run)
   deploy <name> [ref]                Build a site from GitHub and switch to it
   deploy <repo-url> <name> [ref]     The same, for a site's first deploy
   rollback <name>                    Go back to the previous release
@@ -30,7 +28,7 @@ main() {
       usage >&2
       return 1
       ;;
-    setup | deploy | rollback | remote) ;;
+    setup | deploy | rollback) ;;
     *)
       printf "Unknown command: %s. Run 'shipit help' for the list.\n" "$cmd" >&2
       return 1

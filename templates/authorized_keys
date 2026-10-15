@@ -1,1 +1,0 @@
-restrict,command="sudo ${SHIPIT_BIN} remote ${CI_SITE}" ${CI_KEY} shipit:${CI_SITE}

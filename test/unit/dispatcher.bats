@@ -21,18 +21,13 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "help lists every public command, with plan §5's arguments" {
   run "$shipit" help
-  for line in '  setup [--ci-key <name> <public key file | ->]...' '  deploy <name> [ref] ' \
+  for line in '  setup ' '  deploy <name> [ref] ' \
     '  deploy <repo-url> <name> [ref] ' '  rollback <name> ' '  help '; do
     [[ $output == *"$line"* ]] || {
       echo "missing: $line"
       return 1
     }
   done
-}
-
-@test "help leaves out the internal remote command" {
-  run "$shipit" help
-  [[ $output != *remote* ]]
 }
 
 @test "no command prints usage and fails" {
@@ -52,7 +47,7 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "every command except help needs root" {
   as_user
-  for cmd in setup deploy rollback remote; do
+  for cmd in setup deploy rollback; do
     run "$shipit" "$cmd" blog
     [ "$status" -eq 1 ]
     [ "$output" = "Run this as root, or with sudo: sudo shipit $cmd blog" ] || {
@@ -68,13 +63,6 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
   [ "$output" = "Run this as root, or with sudo: sudo shipit deploy https://github.com/me/blog blog main" ]
 }
 
-@test "remote is dispatched with its arguments" {
-  as_root
-  run env -u SSH_ORIGINAL_COMMAND "$shipit" remote blog
-  [ "$status" -eq 1 ]
-  [ "$output" = "No command given. This key can only run: deploy blog [<commit sha or branch>], or rollback blog." ]
-}
-
 @test "works through a symlink, as installed" {
   as_root
   ln -s "$shipit" "$BATS_TEST_TMPDIR/shipit"
@@ -84,7 +72,7 @@ as_user() { stub id '[ "$1" = -u ] && echo 1000 || exec /usr/bin/id "$@"'; }
 
 @test "every library can be sourced without side effects" {
   local lib
-  for lib in common config setup deploy rollback remote; do
+  for lib in common config setup deploy rollback; do
     run bash -c 'set -euo pipefail; . "$1/lib/common.sh"; . "$1/lib/$2.sh"' _ "$REPO_ROOT" "$lib"
     [ "$status" -eq 0 ]
     [ -z "$output" ] || {
